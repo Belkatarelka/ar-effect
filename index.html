@@ -1,37 +1,35 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>AR Effect — Fixed Inversion + Separate Scaling</title>
+<title>Hand Tracking + AR Effects</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
     background: #000;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 100vh;
-    font-family: monospace;
     overflow: hidden;
+    font-family: monospace;
   }
-  #container { position: relative; width: 100vw; height: 100vh; }
-  #video {
+  video, canvas {
     position: absolute;
-    width: 100%; height: 100%;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
     object-fit: cover;
+  }
+  video {
     transform: scaleX(-1);
     opacity: 0;
-    pointer-events: none;
   }
-  #canvas {
-    position: absolute;
-    width: 100%; height: 100%;
-    object-fit: cover;
+  canvas {
+    pointer-events: none;
   }
   #ui {
     position: absolute;
-    top: 16px; left: 16px;
+    top: 16px;
+    left: 16px;
     z-index: 10;
     pointer-events: none;
   }
@@ -47,7 +45,6 @@
     backdrop-filter: blur(8px);
     border-radius: 0 8px 8px 0;
     font-weight: bold;
-    pointer-events: none;
   }
   #status.active { color: #0f0; border-left-color: #0f0; }
   #status.pinch { background: rgba(0,255,0,0.2); color: #fff; }
@@ -86,57 +83,39 @@
 </style>
 </head>
 <body>
-<div id="container">
-  <video id="video" playsinline autoplay muted></video>
-  <canvas id="canvas"></canvas>
-  <div id="ui">
-    <div id="status">🔍 Starting camera...</div>
-  </div>
-  <div class="controls-panel">
-    <label>📏 Width: <input type="range" id="scaleX" min="1" max="8" step="0.1" value="3.5"></label>
-    <label>📐 Height: <input type="range" id="scaleY" min="1" max="8" step="0.1" value="3.5"></label>
-    <span id="scaleVal">3.5 x 3.5</span>
-  </div>
+
+<video id="video" autoplay playsinline></video>
+<canvas id="canvas"></canvas>
+
+<div id="ui">
+  <div id="status">🔍 Starting camera...</div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
-<script>
-const video    = document.getElementById("video");
-const canvas   = document.getElementById("canvas");
-const ctx      = canvas.getContext("2d");
+<div class="controls-panel">
+  <label>📏 Width: <input type="range" id="scaleX" min="1" max="8" step="0.1" value="3.5"></label>
+  <label>📐 Height: <input type="range" id="scaleY" min="1" max="8" step="0.1" value="3.5"></label>
+  <span id="scaleVal">3.5 x 3.5</span>
+</div>
+
+<script type="module">
+import {
+    HandLandmarker,
+    FilesetResolver
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest";
+
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
 
+// Масштабирование маски
 const scaleXInput = document.getElementById("scaleX");
 const scaleYInput = document.getElementById("scaleY");
 const scaleValSpan = document.getElementById("scaleVal");
 
-const LERP         = 0.7;
-const FADE_FRAMES  = 8;
-const PINCH_THRESH = 0.06;
-const PINCH_COOLDOWN = 20;
-
-const EFFECTS = ["none", "posterize", "threshold", "pixelate"];
-const LABELS  = {
-  none:      "✨ NO EFFECT",
-  posterize: "🎨 POSTERIZE",
-  threshold: "⚫ THRESHOLD",
-  pixelate:  "🔲 PIXELATE",
-};
-
-let currentEffect = 0;
-let smoothPts  = null;
-let lastPts    = null;
-let lostFrames = 0;
-let pinchActive   = false;
-let pinchCooldown = 0;
-let cameraReady = false;
-let animationRunning = true;
-
-// Коэффициенты масштабирования маски
 let scaleX = 3.5;
 let scaleY = 3.5;
 
-// Обновление масштаба
 scaleXInput.addEventListener("input", (e) => {
   scaleX = parseFloat(e.target.value);
   scaleValSpan.textContent = `${scaleX.toFixed(1)} x ${scaleY.toFixed(1)}`;
@@ -146,24 +125,60 @@ scaleYInput.addEventListener("input", (e) => {
   scaleValSpan.textContent = `${scaleX.toFixed(1)} x ${scaleY.toFixed(1)}`;
 });
 
-// Для плавного трекинга
-let smoothLeftTips = null;
-let smoothRightTips = null;
-const FINGER_LERP = 0.5;
+// Константы
+const LERP = 0.7;
+const FADE_FRAMES = 8;
+const PINCH_THRESH = 0.06;
+const PINCH_COOLDOWN = 20;
 
-const FINGER_TIPS = [4, 8, 12, 16, 20];
-const FINGER_NAMES = ["THUMB", "INDEX", "MIDDLE", "RING", "PINKY"];
+const EFFECTS = ["none", "posterize", "threshold", "pixelate"];
+const LABELS = {
+  none: "✨ NO EFFECT",
+  posterize: "🎨 POSTERIZE",
+  threshold: "⚫ THRESHOLD",
+  pixelate: "🔲 PIXELATE",
+};
 
-// ─────────────────────────────────────────────────────────────
-// Эффекты
-// ─────────────────────────────────────────────────────────────
+let currentEffect = 0;
+let smoothPts = null;
+let lastPts = null;
+let lostFrames = 0;
+let pinchActive = false;
+let pinchCooldown = 0;
 
+// Сглаживание рук
+const smoothHands = [];
+const SMOOTH_FACTOR = 0.85;
+
+// Соединения для отрисовки скелета
+const connections = [
+    [0,1],[1,2],[2,3],[3,4],  // большой
+    [0,5],[5,6],[6,7],[7,8],  // указательный
+    [0,9],[9,10],[10,11],[11,12], // средний
+    [0,13],[13,14],[14,15],[15,16], // безымянный
+    [0,17],[17,18],[18,19],[19,20], // мизинец
+    [0,17] // запястье
+];
+
+// Функция сглаживания
+function smoothHand(hand, handIndex) {
+    if (!smoothHands[handIndex]) {
+        smoothHands[handIndex] = hand.map(point => ({ x: point.x, y: point.y }));
+    }
+    for (let i = 0; i < hand.length; i++) {
+        smoothHands[handIndex][i].x = smoothHands[handIndex][i].x * SMOOTH_FACTOR + hand[i].x * (1 - SMOOTH_FACTOR);
+        smoothHands[handIndex][i].y = smoothHands[handIndex][i].y * SMOOTH_FACTOR + hand[i].y * (1 - SMOOTH_FACTOR);
+    }
+    return smoothHands[handIndex];
+}
+
+// Функции эффектов
 function applyPosterize(d, m) {
   const levels = 4;
   const step = 255 / (levels - 1);
   for (let i = 0; i < d.length; i += 4) {
     if (m[i] > 128) {
-      d[i]   = Math.round(Math.round(d[i]   / step) * step);
+      d[i] = Math.round(Math.round(d[i] / step) * step);
       d[i+1] = Math.round(Math.round(d[i+1] / step) * step);
       d[i+2] = Math.round(Math.round(d[i+2] / step) * step);
     }
@@ -174,7 +189,7 @@ function applyThreshold(d, m) {
   for (let i = 0; i < d.length; i += 4) {
     if (m[i] > 128) {
       const gray = d[i] * 0.299 + d[i+1] * 0.587 + d[i+2] * 0.114;
-      const val  = gray > 128 ? 255 : 0;
+      const val = gray > 128 ? 255 : 0;
       d[i] = d[i+1] = d[i+2] = val;
     }
   }
@@ -200,102 +215,32 @@ function applyPixelate(d, m, w, h) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-// Вспомогательные функции
-// ─────────────────────────────────────────────────────────────
-
-function getLm(lm, idx, w, h) {
-  return { x: lm[idx].x * w, y: lm[idx].y * h };
+// Получение координат точки
+function getPoint(hand, idx, w, h) {
+  const p = hand[idx];
+  return { x: (1 - p.x) * w, y: p.y * h };
 }
 
-function getLmRaw(lm, idx) {
-  return { x: lm[idx].x, y: lm[idx].y };
-}
-
-function getAllFingerTips(handLandmarks, w, h) {
-  return FINGER_TIPS.map(idx => ({
-    idx: idx,
-    x: handLandmarks[idx].x * w,
-    y: handLandmarks[idx].y * h,
-    rawX: handLandmarks[idx].x,
-    rawY: handLandmarks[idx].y
-  }));
-}
-
-function smoothFingerTips(current, target) {
-  if (!current) return target;
-  return target.map((t, i) => ({
-    idx: t.idx,
-    x: current[i].x * (1 - FINGER_LERP) + t.x * FINGER_LERP,
-    y: current[i].y * (1 - FINGER_LERP) + t.y * FINGER_LERP,
-    rawX: t.rawX,
-    rawY: t.rawY
-  }));
-}
-
-function drawFingerTips(handData, color, w, h, handName) {
-  if (!handData) return;
-  
-  handData.forEach((tip, i) => {
-    ctx.beginPath();
-    ctx.arc(tip.x, tip.y, 6, 0, Math.PI * 2);
-    ctx.fillStyle = color;
-    ctx.fill();
-    ctx.strokeStyle = "white";
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-    
-    ctx.fillStyle = "white";
-    ctx.font = "bold 9px monospace";
-    ctx.shadowBlur = 0;
-    ctx.fillText(FINGER_NAMES[i][0], tip.x - 4, tip.y - 6);
-  });
-}
-
-function drawAllHandJoints(hand, color, w, h) {
-  const connections = [
-    [0,1], [1,2], [2,3], [3,4],
-    [0,5], [5,6], [6,7], [7,8],
-    [0,9], [9,10], [10,11], [11,12],
-    [0,13], [13,14], [14,15], [15,16],
-    [0,17], [17,18], [18,19], [19,20]
-  ];
-  
-  connections.forEach(conn => {
-    const p1 = getLm(hand, conn[0], w, h);
-    const p2 = getLm(hand, conn[1], w, h);
-    ctx.beginPath();
-    ctx.moveTo(p1.x, p1.y);
-    ctx.lineTo(p2.x, p2.y);
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-  });
+function getRawPoint(hand, idx) {
+  return { x: hand[idx].x, y: hand[idx].y };
 }
 
 function dist(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
-// Функция создания маски с РАЗДЕЛЬНЫМ масштабированием по X и Y
+// Создание маски с масштабированием
 function getMaskPoints(thumb, index, w, h) {
-  // Центр между большим и указательным
   const centerX = (thumb.x + index.x) / 2;
   const centerY = (thumb.y + index.y) / 2;
-  
-  // Расстояние между пальцами
   const fingerDist = dist(thumb, index);
-  
-  // Раздельное масштабирование
   const width = fingerDist * scaleX;
   const height = fingerDist * scaleY;
-  
-  // Возвращаем 4 точки прямоугольника
   return [
-    { x: centerX - width, y: centerY - height },  // лево-верх
-    { x: centerX + width, y: centerY - height },  // право-верх
-    { x: centerX + width, y: centerY + height },  // право-низ
-    { x: centerX - width, y: centerY + height }   // лево-низ
+    { x: centerX - width, y: centerY - height },
+    { x: centerX + width, y: centerY - height },
+    { x: centerX + width, y: centerY + height },
+    { x: centerX - width, y: centerY + height }
   ];
 }
 
@@ -308,8 +253,7 @@ function lerpPts(cur, tgt, t) {
   return cur.map((p, i) => lerpPt(p, tgt[i], t));
 }
 
-function buildMask(pts) {
-  const w = canvas.width, h = canvas.height;
+function buildMask(pts, w, h) {
   const off = document.createElement("canvas");
   off.width = w; off.height = h;
   const c = off.getContext("2d");
@@ -330,7 +274,6 @@ function drawOverlay(pts) {
   pts.forEach(p => ctx.lineTo(p.x, p.y));
   ctx.closePath();
   ctx.stroke();
-  
   pts.forEach(p => {
     ctx.beginPath();
     ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
@@ -342,244 +285,197 @@ function drawOverlay(pts) {
   });
 }
 
-// ─────────────────────────────────────────────────────────────
-// MediaPipe callback — ИСПРАВЛЕНА ИНВЕРСИЯ
-// ─────────────────────────────────────────────────────────────
-
-function onResults(results) {
-  if (!cameraReady) return;
-  
-  const w = canvas.width;
-  const h = canvas.height;
-  if (w === 0 || h === 0) return;
-
-  ctx.save();
-  ctx.scale(-1, 1);
-  ctx.drawImage(results.image, -w, 0, w, h);
-  ctx.restore();
-
-  const hands = results.multiHandLandmarks;
-  const handedness = results.multiHandedness;
-  
-  let leftHand = null;   // физически левая рука пользователя
-  let rightHand = null;  // физически правая рука пользователя
-
-  // ИСПРАВЛЕНИЕ ИНВЕРСИИ:
-  // MediaPipe в ЗЕРКАЛЬНОМ видео определяет Left/Right относительно отражения
-  // Поэтому: 
-  // - Если MediaPipe сказал "Left" → это физически ПРАВАЯ рука пользователя
-  // - Если MediaPipe сказал "Right" → это физически ЛЕВАЯ рука пользователя
-  if (hands && hands.length >= 2) {
-    for (let i = 0; i < hands.length; i++) {
-      const label = handedness[i].label;
-      if (label === "Left") {
-        rightHand = hands[i];  // MediaPipe Left = правая рука пользователя
-      } else if (label === "Right") {
-        leftHand = hands[i];   // MediaPipe Right = левая рука пользователя
-      }
-    }
-  } else if (hands && hands.length === 1) {
-    // Для одной руки - определяем по положению на экране
-    const handX = hands[0][0].x;
-    if (handX < 0.5) {
-      leftHand = hands[0];
-    } else {
-      rightHand = hands[0];
-    }
+function drawSkeleton(hand, color, w, h) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  for (const [a, b] of connections) {
+    ctx.beginPath();
+    ctx.moveTo((1 - hand[a].x) * w, hand[a].y * h);
+    ctx.lineTo((1 - hand[b].x) * w, hand[b].y * h);
+    ctx.stroke();
   }
-
-  // ========== ТРЕКИНГ И ОТРИСОВКА ПАЛЬЦЕВ ==========
-  
-  if (leftHand) {
-    drawAllHandJoints(leftHand, "rgba(0, 200, 255, 0.3)", w, h);
-    const rawTips = getAllFingerTips(leftHand, w, h);
-    smoothLeftTips = smoothFingerTips(smoothLeftTips, rawTips);
-    drawFingerTips(smoothLeftTips, "rgba(0, 200, 255, 0.9)", w, h, "L");
-  }
-  
-  if (rightHand) {
-    drawAllHandJoints(rightHand, "rgba(255, 100, 150, 0.3)", w, h);
-    const rawTips = getAllFingerTips(rightHand, w, h);
-    smoothRightTips = smoothFingerTips(smoothRightTips, rawTips);
-    drawFingerTips(smoothRightTips, "rgba(255, 100, 150, 0.9)", w, h, "R");
-  }
-
-  // ========== МАСКА И ЭФФЕКТЫ ==========
-  
-  if (leftHand && rightHand) {
-    // Берём большой и указательный с каждой руки
-    const leftThumb = getLm(leftHand, 4, w, h);
-    const leftIndex = getLm(leftHand, 8, w, h);
-    const rightThumb = getLm(rightHand, 4, w, h);
-    const rightIndex = getLm(rightHand, 8, w, h);
-    
-    // Проверка щипка (каждая рука отвечает за себя)
-    const leftPinchRaw = dist(getLmRaw(leftHand, 4), getLmRaw(leftHand, 8)) < PINCH_THRESH;
-    const rightPinchRaw = dist(getLmRaw(rightHand, 4), getLmRaw(rightHand, 8)) < PINCH_THRESH;
-    const bothPinch = leftPinchRaw && rightPinchRaw;
-
-    if (pinchCooldown > 0) pinchCooldown--;
-
-    if (bothPinch && !pinchActive && pinchCooldown === 0) {
-      currentEffect = (currentEffect + 1) % EFFECTS.length;
-      pinchActive = true;
-      pinchCooldown = PINCH_COOLDOWN;
-      statusEl.style.transform = "scale(1.05)";
-      setTimeout(() => { statusEl.style.transform = ""; }, 150);
-    } else if (!bothPinch) {
-      pinchActive = false;
-    }
-
-    // МАСКА для каждой руки с РАЗДЕЛЬНЫМ масштабированием
-    const leftMask = getMaskPoints(leftThumb, leftIndex, w, h);
-    const rightMask = getMaskPoints(rightThumb, rightIndex, w, h);
-    
-    // Объединяем маски (общий bounding box)
-    const allPoints = [...leftMask, ...rightMask];
-    const minX = Math.min(...allPoints.map(p => p.x));
-    const maxX = Math.max(...allPoints.map(p => p.x));
-    const minY = Math.min(...allPoints.map(p => p.y));
-    const maxY = Math.max(...allPoints.map(p => p.y));
-    
-    const target = [
-      { x: minX, y: minY },
-      { x: maxX, y: minY },
-      { x: maxX, y: maxY },
-      { x: minX, y: maxY }
-    ];
-
-    lostFrames = 0;
-    smoothPts = smoothPts ? lerpPts(smoothPts, target, LERP) : target;
-    lastPts = [...smoothPts];
-
-    const eff = EFFECTS[currentEffect];
-    statusEl.textContent = LABELS[eff] + (bothPinch ? " 🤏" : " 👌");
-    statusEl.className = eff !== "none" ? "active" : "";
-    if (bothPinch) statusEl.classList.add("pinch");
-    else statusEl.classList.remove("pinch");
-
-  } else if (leftHand || rightHand) {
-    // Режим одной руки
-    const activeHand = leftHand || rightHand;
-    const thumb = getLm(activeHand, 4, w, h);
-    const index = getLm(activeHand, 8, w, h);
-    
-    const target = getMaskPoints(thumb, index, w, h);
-    
-    lostFrames = 0;
-    smoothPts = smoothPts ? lerpPts(smoothPts, target, LERP) : target;
-    lastPts = [...smoothPts];
-    
-    statusEl.textContent = "🖐️ ONE HAND — use two hands for effects";
-    statusEl.className = "";
-  } else {
-    lostFrames++;
-    if (lostFrames < FADE_FRAMES && lastPts) {
-      smoothPts = lastPts;
-    } else {
-      smoothPts = null;
-      lastPts = null;
-    }
-    statusEl.textContent = "✌️ Show both hands";
-    statusEl.className = "";
-  }
-
-  // Применяем эффект
-  const eff = EFFECTS[currentEffect];
-  if (smoothPts && eff !== "none") {
-    const imageData = ctx.getImageData(0, 0, w, h);
-    const mask = buildMask(smoothPts);
-
-    if (eff === "posterize") applyPosterize(imageData.data, mask);
-    if (eff === "threshold") applyThreshold(imageData.data, mask);
-    if (eff === "pixelate") applyPixelate(imageData.data, mask, w, h);
-
-    ctx.putImageData(imageData, 0, 0);
-    drawOverlay(smoothPts);
-  } else if (smoothPts) {
-    drawOverlay(smoothPts);
+  for (const point of hand) {
+    ctx.beginPath();
+    ctx.arc((1 - point.x) * w, point.y * h, 5, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = "white";
+    ctx.lineWidth = 1;
+    ctx.stroke();
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-// Инициализация
-// ─────────────────────────────────────────────────────────────
-
-const handsDetector = new Hands({
-  locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
-});
-
-handsDetector.setOptions({
-  maxNumHands: 2,
-  modelComplexity: 1,
-  minDetectionConfidence: 0.5,
-  minTrackingConfidence: 0.5,
-});
-
-handsDetector.onResults(onResults);
-
-async function startCamera() {
-  try {
+// ОСНОВНАЯ ФУНКЦИЯ
+async function init() {
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: "user",
-        width: { ideal: 1280 },
-        height: { ideal: 720 }
-      }
+        video: { width: 1280, height: 720 }
     });
     video.srcObject = stream;
-    
-    return new Promise((resolve) => {
-      video.onloadedmetadata = () => {
-        video.play().then(() => {
-          const checkReady = setInterval(() => {
-            if (video.videoWidth > 0 && video.videoHeight > 0) {
-              clearInterval(checkReady);
-              canvas.width = video.videoWidth;
-              canvas.height = video.videoHeight;
-              cameraReady = true;
-              statusEl.textContent = "✌️ Show both hands";
-              console.log(`✅ Camera ready: ${canvas.width}x${canvas.height}`);
-              resolve();
-            }
-          }, 100);
-        });
-      };
+    await video.play();
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+    );
+
+    const handLandmarker = await HandLandmarker.createFromOptions(vision, {
+        baseOptions: {
+            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+        },
+        runningMode: "VIDEO",
+        numHands: 2
     });
-  } catch (e) {
-    console.error("Camera error:", e);
-    statusEl.textContent = "❌ Camera error: " + e.message;
-    alert("Camera error: " + e.message);
-  }
-}
 
-async function loop() {
-  if (!animationRunning) return;
-  
-  if (cameraReady && video.readyState >= 2) {
-    if (video.videoWidth !== canvas.width && video.videoWidth > 0) {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      console.log(`🔄 Canvas resized to ${canvas.width}x${canvas.height}`);
+    statusEl.textContent = "✌️ Show both hands";
+
+    function render() {
+        const w = canvas.width;
+        const h = canvas.height;
+        
+        ctx.clearRect(0, 0, w, h);
+        
+        // Рисуем текущий кадр с видео (зеркально)
+        ctx.save();
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, -w, 0, w, h);
+        ctx.restore();
+
+        const result = handLandmarker.detectForVideo(video, performance.now());
+        
+        let leftHand = null;
+        let rightHand = null;
+        
+        if (result.landmarks && result.landmarks.length >= 2) {
+            // Определяем руки по X координате (левая = та что левее на экране)
+            const hand0x = result.landmarks[0][0].x;
+            const hand1x = result.landmarks[1][0].x;
+            
+            const smoothed0 = smoothHand(result.landmarks[0], 0);
+            const smoothed1 = smoothHand(result.landmarks[1], 1);
+            
+            if (hand0x < hand1x) {
+                leftHand = smoothed0;
+                rightHand = smoothed1;
+            } else {
+                leftHand = smoothed1;
+                rightHand = smoothed0;
+            }
+        } else if (result.landmarks && result.landmarks.length === 1) {
+            // Одна рука
+            const single = smoothHand(result.landmarks[0], 0);
+            if (single[0].x < 0.5) {
+                leftHand = single;
+            } else {
+                rightHand = single;
+            }
+        }
+        
+        // Рисуем скелеты
+        if (leftHand) drawSkeleton(leftHand, "rgba(0, 200, 255, 0.8)", w, h);
+        if (rightHand) drawSkeleton(rightHand, "rgba(255, 100, 150, 0.8)", w, h);
+        
+        // Маска и эффекты
+        if (leftHand && rightHand) {
+            // Получаем точки большого и указательного пальцев
+            const leftThumb = getPoint(leftHand, 4, w, h);
+            const leftIndex = getPoint(leftHand, 8, w, h);
+            const rightThumb = getPoint(rightHand, 4, w, h);
+            const rightIndex = getPoint(rightHand, 8, w, h);
+            
+            // Проверка щипка
+            const leftPinchRaw = dist(getRawPoint(leftHand, 4), getRawPoint(leftHand, 8)) < PINCH_THRESH;
+            const rightPinchRaw = dist(getRawPoint(rightHand, 4), getRawPoint(rightHand, 8)) < PINCH_THRESH;
+            const bothPinch = leftPinchRaw && rightPinchRaw;
+            
+            if (pinchCooldown > 0) pinchCooldown--;
+            if (bothPinch && !pinchActive && pinchCooldown === 0) {
+                currentEffect = (currentEffect + 1) % EFFECTS.length;
+                pinchActive = true;
+                pinchCooldown = PINCH_COOLDOWN;
+                statusEl.style.transform = "scale(1.05)";
+                setTimeout(() => { statusEl.style.transform = ""; }, 150);
+            } else if (!bothPinch) {
+                pinchActive = false;
+            }
+            
+            // Маски для каждой руки
+            const leftMask = getMaskPoints(leftThumb, leftIndex, w, h);
+            const rightMask = getMaskPoints(rightThumb, rightIndex, w, h);
+            
+            // Объединяем маски
+            const allPoints = [...leftMask, ...rightMask];
+            const minX = Math.max(0, Math.min(...allPoints.map(p => p.x)));
+            const maxX = Math.min(w, Math.max(...allPoints.map(p => p.x)));
+            const minY = Math.max(0, Math.min(...allPoints.map(p => p.y)));
+            const maxY = Math.min(h, Math.max(...allPoints.map(p => p.y)));
+            
+            const target = [
+                { x: minX, y: minY },
+                { x: maxX, y: minY },
+                { x: maxX, y: maxY },
+                { x: minX, y: maxY }
+            ];
+            
+            lostFrames = 0;
+            smoothPts = smoothPts ? lerpPts(smoothPts, target, LERP) : target;
+            lastPts = [...smoothPts];
+            
+            const eff = EFFECTS[currentEffect];
+            statusEl.textContent = LABELS[eff] + (bothPinch ? " 🤏" : " 👌");
+            statusEl.className = eff !== "none" ? "active" : "";
+            if (bothPinch) statusEl.classList.add("pinch");
+            else statusEl.classList.remove("pinch");
+            
+        } else if (leftHand || rightHand) {
+            const activeHand = leftHand || rightHand;
+            const thumb = getPoint(activeHand, 4, w, h);
+            const index = getPoint(activeHand, 8, w, h);
+            const target = getMaskPoints(thumb, index, w, h);
+            
+            lostFrames = 0;
+            smoothPts = smoothPts ? lerpPts(smoothPts, target, LERP) : target;
+            lastPts = [...smoothPts];
+            
+            statusEl.textContent = "🖐️ ONE HAND — use two for effects";
+            statusEl.className = "";
+        } else {
+            lostFrames++;
+            if (lostFrames < FADE_FRAMES && lastPts) {
+                smoothPts = lastPts;
+            } else {
+                smoothPts = null;
+                lastPts = null;
+            }
+            statusEl.textContent = "✌️ Show both hands";
+            statusEl.className = "";
+        }
+        
+        // Применяем эффект
+        const eff = EFFECTS[currentEffect];
+        if (smoothPts && eff !== "none") {
+            const imageData = ctx.getImageData(0, 0, w, h);
+            const mask = buildMask(smoothPts, w, h);
+            
+            if (eff === "posterize") applyPosterize(imageData.data, mask);
+            if (eff === "threshold") applyThreshold(imageData.data, mask);
+            if (eff === "pixelate") applyPixelate(imageData.data, mask, w, h);
+            
+            ctx.putImageData(imageData, 0, 0);
+            drawOverlay(smoothPts);
+        } else if (smoothPts) {
+            drawOverlay(smoothPts);
+        }
+        
+        requestAnimationFrame(render);
     }
-    await handsDetector.send({ image: video });
-  }
-  requestAnimationFrame(loop);
+    
+    render();
 }
 
-startCamera().then(() => {
-  loop();
-}).catch(e => {
-  console.error("Start failed:", e);
-});
-
-window.addEventListener("beforeunload", () => {
-  animationRunning = false;
-  if (video.srcObject) {
-    const tracks = video.srcObject.getTracks();
-    tracks.forEach(track => track.stop());
-  }
-});
+init();
 </script>
+
 </body>
 </html>
