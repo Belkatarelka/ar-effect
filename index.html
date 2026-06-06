@@ -137,12 +137,27 @@ function applyPixelate(d, m, w, h) {
   }
 }
 
-function applyGlitch(d, m, w, h) {
-  // Обновляем линии каждые несколько кадров
-  if (Math.random() < 0.4) glitchLines = randomGlitchLines(w, h);
+// Буфер предыдущих кадров для глитча
+const glitchFrameBuffer = [];
+const GLITCH_BUF_SIZE = 8;
 
-  // RGB сдвиг
-  const rgbShift = 8 + Math.floor(Math.random() * 16);
+function applyGlitch(d, m, w, h) {
+  // Сохраняем копию текущего кадра в буфер
+  const copy = new Uint8ClampedArray(d);
+  glitchFrameBuffer.push(copy);
+  if (glitchFrameBuffer.length > GLITCH_BUF_SIZE) glitchFrameBuffer.shift();
+
+  // Случайно берём старый кадр из буфера — это даёт эффект "мигания" кадров
+  if (glitchFrameBuffer.length > 2 && Math.random() < 0.6) {
+    const oldFrame = glitchFrameBuffer[Math.floor(Math.random() * glitchFrameBuffer.length)];
+    for (let i = 0; i < d.length; i += 4) {
+      if (m[i] <= 128) continue;
+      d[i]=oldFrame[i]; d[i+1]=oldFrame[i+1]; d[i+2]=oldFrame[i+2];
+    }
+  }
+
+  // Жёсткий RGB сдвиг
+  const rgbShift = 15 + Math.floor(Math.random() * 40);
   for (let i = 0; i < d.length; i += 4) {
     if (m[i] <= 128) continue;
     const x = (i/4) % w;
@@ -151,38 +166,55 @@ function applyGlitch(d, m, w, h) {
     const bi = (y*w + Math.max(x-rgbShift, 0))*4;
     if (m[ri]>128) d[i]   = d[ri];
     if (m[bi]>128) d[i+2] = d[bi];
+    // Зелёный канал вверх
+    if (Math.random()<0.3) d[i+1] = Math.min(255, d[i+1]+80);
   }
 
-  // Полосы со смещением
+  // Много жёстких полос
+  glitchLines = randomGlitchLines(w, h);
   glitchLines.forEach(line => {
+    // Случайный цветовой канал залив
+    const colorHit = Math.random();
     for (let row = line.y; row < Math.min(line.y+line.height, h); row++) {
       for (let x = 0; x < w; x++) {
         const srcX = Math.max(0, Math.min(w-1, x + line.shift));
         const si = (row*w + Math.floor(srcX))*4;
         const di = (row*w + x)*4;
-        if (m[di] <= 128 || m[si] <= 128) continue;
+        if (m[di]<=128||m[si]<=128) continue;
         if (line.invert) {
-          d[di]   = 255 - d[si];
-          d[di+1] = 255 - d[si+1];
-          d[di+2] = 255 - d[si+2];
+          d[di]=255-d[si]; d[di+1]=255-d[si+1]; d[di+2]=255-d[si+2];
         } else {
           d[di]=d[si]; d[di+1]=d[si+1]; d[di+2]=d[si+2];
         }
+        // Цветовой взрыв на полосе
+        if (colorHit < 0.3)      d[di]   = Math.min(255, d[di]+150);
+        else if (colorHit < 0.6) d[di+1] = Math.min(255, d[di+1]+150);
+        else                     d[di+2] = Math.min(255, d[di+2]+150);
       }
     }
   });
 
-  // Случайные инвертированные блоки
-  if (Math.random() < 0.3) {
-    const bx = Math.floor(Math.random()*w);
-    const by = Math.floor(Math.random()*h);
-    const bw = 20 + Math.floor(Math.random()*80);
-    const bh = 5  + Math.floor(Math.random()*20);
+  // Много случайных инвертированных блоков
+  const blockCount = 3 + Math.floor(Math.random()*6);
+  for (let b=0; b<blockCount; b++) {
+    const bx=Math.floor(Math.random()*w);
+    const by=Math.floor(Math.random()*h);
+    const bw=10+Math.floor(Math.random()*120);
+    const bh=2+Math.floor(Math.random()*30);
     for (let y=by; y<Math.min(by+bh,h); y++)
       for (let x=bx; x<Math.min(bx+bw,w); x++) {
         const pi=(y*w+x)*4;
         if(m[pi]>128){d[pi]=255-d[pi];d[pi+1]=255-d[pi+1];d[pi+2]=255-d[pi+2];}
       }
+  }
+
+  // Случайные горизонтальные белые/цветные полосы
+  if (Math.random()<0.4) {
+    const sy=Math.floor(Math.random()*h);
+    for (let x=0; x<w; x++) {
+      const pi=(sy*w+x)*4;
+      if(m[pi]>128){d[pi]=255;d[pi+1]=255;d[pi+2]=255;}
+    }
   }
 }
 
@@ -517,16 +549,32 @@ function onResults(results) {
     const hand=leftHand||rightHand;
     const thumb=getLm(hand,4,w,h), index=getLm(hand,8,w,h);
     const cx=(thumb.x+index.x)/2, cy=(thumb.y+index.y)/2;
-    const fd=dist(thumb,index)*1.5;
+
+    // Одноручный щипок — переключение эффекта
+    const onePinch=dist(getLmRaw(hand,4),getLmRaw(hand,8))<PINCH_THRESH;
+    if (pinchCooldown>0) pinchCooldown--;
+    if (onePinch&&!pinchActive&&pinchCooldown===0) {
+      currentEffect=(currentEffect+1)%EFFECTS.length;
+      pinchActive=true; pinchCooldown=PINCH_COOLDOWN;
+      effectLabelText=LABELS[EFFECTS[currentEffect]];
+      effectLabelTimer=40;
+    } else if (!onePinch) pinchActive=false;
+
+    // Масштаб по осям: горизонтальный разброс = ширина, вертикальный = высота
+    const dx=Math.abs(thumb.x-index.x);
+    const dy=Math.abs(thumb.y-index.y);
+    const halfW=dx*2.5+60;
+    const halfH=dy*2.5+60;
     const target=[
-      {x:cx-fd,y:cy-fd},{x:cx+fd,y:cy-fd},
-      {x:cx+fd,y:cy+fd},{x:cx-fd,y:cy+fd}
+      {x:cx-halfW,y:cy-halfH},{x:cx+halfW,y:cy-halfH},
+      {x:cx+halfW,y:cy+halfH},{x:cx-halfW,y:cy+halfH}
     ];
     lostFrames=0;
     smoothPts=smoothPts?lerpPts(smoothPts,target,LERP):target;
     lastPts=[...smoothPts];
-    statusEl.textContent="ONE HAND — show both for effects";
-    statusEl.className="";
+    const eff=EFFECTS[currentEffect];
+    statusEl.textContent="ONE HAND: "+LABELS[eff]+(onePinch?" [PINCH]":"");
+    statusEl.className=eff!=="none"?"active":"";
   } else {
     lostFrames++;
     if (lostFrames<FADE_FRAMES&&lastPts) smoothPts=lastPts;
