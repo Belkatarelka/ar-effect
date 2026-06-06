@@ -307,7 +307,7 @@ async function startCamera() {
 
 async function loop() {
   await handsDetector.send({ image: video });
-  loop();
+  loop(); // Рекурсивный вызов
 }
 
 startCamera();
