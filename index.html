@@ -373,15 +373,20 @@ function buildMask(pts) {
 
 // Наклонный прямоугольник по двум точкам рук
 function getRotatedRect(lThumb, lIndex, rThumb, rIndex) {
-  // Центры каждой руки
   const lCenter = { x:(lThumb.x+lIndex.x)/2, y:(lThumb.y+lIndex.y)/2 };
   const rCenter = { x:(rThumb.x+rIndex.x)/2, y:(rThumb.y+rIndex.y)/2 };
 
-  // Размер = расстояние между пальцами каждой руки (среднее)
-  const lDist = dist(lThumb, lIndex);
-  const rDist = dist(rThumb, rIndex);
-  const halfW = dist(lCenter, rCenter) / 2 + (lDist+rDist)/2;
-  const halfH = (lDist+rDist)/2 * 1.5;
+  // Разница по X и Y между пальцами каждой руки
+  // Горизонтальная составляющая → ширина, вертикальная → высота
+  const lDx = Math.abs(lThumb.x - lIndex.x);
+  const lDy = Math.abs(lThumb.y - lIndex.y);
+  const rDx = Math.abs(rThumb.x - rIndex.x);
+  const rDy = Math.abs(rThumb.y - rIndex.y);
+
+  // Ширина = расстояние между центрами рук + горизонтальный разброс пальцев
+  const halfW = dist(lCenter, rCenter)/2 + (lDx+rDx)/2 * 1.5;
+  // Высота = вертикальный разброс пальцев * масштаб
+  const halfH = (lDy+rDy)/2 * 2.5 + 40;
 
   // Угол наклона по оси между центрами рук
   const angle = Math.atan2(rCenter.y-lCenter.y, rCenter.x-lCenter.x);
@@ -389,7 +394,6 @@ function getRotatedRect(lThumb, lIndex, rThumb, rIndex) {
   const cy = (lCenter.y+rCenter.y)/2;
 
   const cos = Math.cos(angle), sin = Math.sin(angle);
-  // 4 угла наклонного прямоугольника
   return [
     { x: cx - cos*halfW + sin*halfH, y: cy - sin*halfW - cos*halfH },
     { x: cx + cos*halfW + sin*halfH, y: cy + sin*halfW - cos*halfH },
