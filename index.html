@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>AR Effect — Gojo Satoru Easter Egg</title>
+<title>AR Effect — Full Finger Tracking</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -111,15 +111,20 @@ let gojoModeActive = false;
 let gojoCooldown = 0;
 let gojoTimer = null;
 
+// Для плавного трекинга кончиков пальцев
+let smoothLeftTips = null;
+let smoothRightTips = null;
+const FINGER_LERP = 0.5;
+
+// Индексы кончиков пальцев
+const FINGER_TIPS = [4, 8, 12, 16, 20];
+const FINGER_NAMES = ["THUMB", "INDEX", "MIDDLE", "RING", "PINKY"];
+
 // ─────────────────────────────────────────────────────────────
-// ЖЕСТ ГОДЖО САТОРУ (исправленный)
+// ЖЕСТ ГОДЖО САТОРУ
 // ─────────────────────────────────────────────────────────────
 
 function isGojoPose(handLandmarks) {
-  // Индексы MediaPipe:
-  // 4 - большой, 8 - указательный, 12 - средний, 16 - безымянный, 20 - мизинец
-  // 5 - основание указательного, 9 - основание среднего, 14 - основание безымянного, 18 - основание мизинца
-  
   const thumbTip = handLandmarks[4];
   const indexTip = handLandmarks[8];
   const middleTip = handLandmarks[12];
@@ -131,49 +136,37 @@ function isGojoPose(handLandmarks) {
   const ringBase = handLandmarks[14];
   const pinkyBase = handLandmarks[18];
   
-  // 1. Мизинец и безымянный - ВЫПРЯМЛЕНЫ (кончик выше основания по Y)
   const ringStraight = ringTip.y < ringBase.y;
   const pinkyStraight = pinkyTip.y < pinkyBase.y;
-  
-  // 2. Указательный и средний - СОГНУТЫ (кончик ниже основания)
   const indexBent = indexTip.y > indexBase.y;
   const middleBent = middleTip.y > middleBase.y;
-  
-  // 3. Большой палец сверху (придерживает согнутые пальцы)
   const thumbOnTop = thumbTip.y < indexTip.y && Math.abs(thumbTip.x - indexTip.x) < 0.1;
   
   return ringStraight && pinkyStraight && indexBent && middleBent && thumbOnTop;
 }
 
-// Активация пасхалки
 function activateGojoMode() {
   if (gojoModeActive) return;
   
   gojoModeActive = true;
   
-  // Сохраняем старый эффект
   const oldEffect = currentEffect;
+  currentEffect = 3;
   
-  // Включаем ультимативный эффект (пикселизация + фиолетовый вайб)
-  currentEffect = 3; // pixelate
-  
-  // Визуальные эффекты
   document.body.classList.add('gojo-mode');
   statusEl.classList.add('gojo');
   statusEl.textContent = "∞ RYŌIKI TENKAI — GOJO SATORU ∞";
   
-  // Флеш-эффект
   const container = document.getElementById('container');
   container.classList.add('gojo-flash');
   setTimeout(() => container.classList.remove('gojo-flash'), 500);
   
-  // Таймер на возврат (5 секунд)
   if (gojoTimer) clearTimeout(gojoTimer);
   gojoTimer = setTimeout(() => {
     gojoModeActive = false;
     document.body.classList.remove('gojo-mode');
     statusEl.classList.remove('gojo');
-    currentEffect = 0; // возвращаем на none
+    currentEffect = 0;
     const eff = EFFECTS[currentEffect];
     statusEl.textContent = LABELS[eff];
     statusEl.className = "";
@@ -208,7 +201,7 @@ function applyThreshold(d, m) {
 }
 
 function applyPixelate(d, m, w, h) {
-  const block = gojoModeActive ? 8 : 12; // в режиме Годжо пикселизация сильнее
+  const block = gojoModeActive ? 8 : 12;
   for (let y = 0; y < h; y += block) {
     for (let x = 0; x < w; x += block) {
       const ci = (y * w + x) * 4;
@@ -218,7 +211,6 @@ function applyPixelate(d, m, w, h) {
       const si = (Math.floor(cy) * w + Math.floor(cx)) * 4;
       let r = d[si], g = d[si+1], b = d[si+2];
       
-      // В режиме Годжо добавляем фиолетовый оттенок
       if (gojoModeActive) {
         r = Math.min(255, r + 80);
         g = Math.min(255, g + 40);
@@ -236,7 +228,7 @@ function applyPixelate(d, m, w, h) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Вспомогательные функции
+// ТРЕКИНГ ПАЛЬЦЕВ (новая хуйня)
 // ─────────────────────────────────────────────────────────────
 
 function getLm(lm, idx, w, h) {
@@ -245,6 +237,77 @@ function getLm(lm, idx, w, h) {
 
 function getLmRaw(lm, idx) {
   return { x: lm[idx].x, y: lm[idx].y };
+}
+
+function getAllFingerTips(handLandmarks, w, h) {
+  return FINGER_TIPS.map(idx => ({
+    idx: idx,
+    x: handLandmarks[idx].x * w,
+    y: handLandmarks[idx].y * h,
+    rawX: handLandmarks[idx].x,
+    rawY: handLandmarks[idx].y
+  }));
+}
+
+function smoothFingerTips(current, target) {
+  if (!current) return target;
+  return target.map((t, i) => ({
+    idx: t.idx,
+    x: current[i].x * (1 - FINGER_LERP) + t.x * FINGER_LERP,
+    y: current[i].y * (1 - FINGER_LERP) + t.y * FINGER_LERP,
+    rawX: t.rawX,
+    rawY: t.rawY
+  }));
+}
+
+function drawFingerTips(handData, color, w, h, handName) {
+  if (!handData) return;
+  
+  handData.forEach((tip, i) => {
+    ctx.beginPath();
+    ctx.arc(tip.x, tip.y, 7, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = "white";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    
+    // Подпись
+    ctx.fillStyle = "white";
+    ctx.font = "bold 10px monospace";
+    ctx.shadowBlur = 0;
+    ctx.fillText(`${handName} ${FINGER_NAMES[i]}`, tip.x - 20, tip.y - 10);
+    
+    // Рисуем линию от кончика к основанию (для красоты)
+    if (i === 0) {
+      ctx.beginPath();
+      ctx.moveTo(tip.x, tip.y);
+      ctx.lineTo(tip.x - 15, tip.y + 15);
+      ctx.strokeStyle = "rgba(255,255,255,0.5)";
+      ctx.stroke();
+    }
+  });
+}
+
+function drawAllHandJoints(hand, color, w, h) {
+  const connections = [
+    [0,1], [1,2], [2,3], [3,4],
+    [0,5], [5,6], [6,7], [7,8],
+    [0,9], [9,10], [10,11], [11,12],
+    [0,13], [13,14], [14,15], [15,16],
+    [0,17], [17,18], [18,19], [19,20]
+  ];
+  
+  connections.forEach(conn => {
+    const p1 = getLm(hand, conn[0], w, h);
+    const p2 = getLm(hand, conn[1], w, h);
+    ctx.beginPath();
+    ctx.moveTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  });
 }
 
 function dist(a, b) {
@@ -332,20 +395,43 @@ function onResults(results) {
     }
   }
 
-  // ПАСХАЛКА: проверка жеста Годжо (на любой руке)
+  // ========== ТРЕКИНГ КОНЧИКОВ ВСЕХ ПАЛЬЦЕВ ==========
+  
+  if (leftHandOnScreen) {
+    // Рисуем скелет руки (опционально, закомментируй если не надо)
+    drawAllHandJoints(leftHandOnScreen, "rgba(0, 200, 255, 0.3)", w, h);
+    
+    // Получаем и сглаживаем кончики пальцев
+    const rawTips = getAllFingerTips(leftHandOnScreen, w, h);
+    smoothLeftTips = smoothFingerTips(smoothLeftTips, rawTips);
+    
+    // Рисуем кончики пальцев левой руки
+    drawFingerTips(smoothLeftTips, "rgba(0, 200, 255, 0.9)", w, h, "← LEFT");
+  }
+  
+  if (rightHandOnScreen) {
+    drawAllHandJoints(rightHandOnScreen, "rgba(255, 100, 150, 0.3)", w, h);
+    
+    const rawTips = getAllFingerTips(rightHandOnScreen, w, h);
+    smoothRightTips = smoothFingerTips(smoothRightTips, rawTips);
+    
+    drawFingerTips(smoothRightTips, "rgba(255, 100, 150, 0.9)", w, h, "RIGHT →");
+  }
+
+  // ПАСХАЛКА
   if (gojoCooldown > 0) gojoCooldown--;
   
   if (hands && hands.length >= 1 && !gojoModeActive && gojoCooldown === 0) {
-    // Проверяем обе руки на жест Годжо
     const leftGojo = leftHandOnScreen ? isGojoPose(leftHandOnScreen) : false;
     const rightGojo = rightHandOnScreen ? isGojoPose(rightHandOnScreen) : false;
     
     if (leftGojo || rightGojo) {
       activateGojoMode();
-      gojoCooldown = 120; // кулдаун чтобы не спамить
+      gojoCooldown = 120;
     }
   }
 
+  // Обычный режим с маской и эффектами
   if (leftHandOnScreen && rightHandOnScreen && !gojoModeActive) {
     const leftThumb = getLmRaw(leftHandOnScreen, 4);
     const leftIndex = getLmRaw(leftHandOnScreen, 8);
@@ -383,13 +469,11 @@ function onResults(results) {
     smoothPts = smoothPts ? lerpPts(smoothPts, target, LERP) : target;
     lastPts = [...smoothPts];
 
-    if (!gojoModeActive) {
-      const eff = EFFECTS[currentEffect];
-      statusEl.textContent = LABELS[eff] + (bothPinch ? " 🤏" : " 👌");
-      statusEl.className = eff !== "none" ? "active" : "";
-      if (bothPinch) statusEl.classList.add("pinch");
-      else statusEl.classList.remove("pinch");
-    }
+    const eff = EFFECTS[currentEffect];
+    statusEl.textContent = LABELS[eff] + (bothPinch ? " 🤏" : " 👌");
+    statusEl.className = eff !== "none" ? "active" : "";
+    if (bothPinch) statusEl.classList.add("pinch");
+    else statusEl.classList.remove("pinch");
 
   } else if (!gojoModeActive) {
     lostFrames++;
@@ -426,7 +510,7 @@ function onResults(results) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Инициализация MediaPipe
+// Инициализация
 // ─────────────────────────────────────────────────────────────
 
 const handsDetector = new Hands({
@@ -441,10 +525,6 @@ handsDetector.setOptions({
 });
 
 handsDetector.onResults(onResults);
-
-// ─────────────────────────────────────────────────────────────
-// Запуск камеры
-// ─────────────────────────────────────────────────────────────
 
 async function startCamera() {
   try {
@@ -481,10 +561,6 @@ async function startCamera() {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-// Главный цикл
-// ─────────────────────────────────────────────────────────────
-
 async function loop() {
   if (!animationRunning) return;
   
@@ -499,7 +575,6 @@ async function loop() {
   requestAnimationFrame(loop);
 }
 
-// Старт
 startCamera().then(() => {
   loop();
 }).catch(e => {
