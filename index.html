@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>AR Effect — Full Finger Tracking</title>
+<title>AR Effect — Single Hand + Infinity Mode</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -66,6 +66,20 @@
   .gojo-flash {
     animation: gojoFlash 0.5s ease;
   }
+  
+  #mode-badge {
+    position: absolute;
+    bottom: 20px;
+    right: 20px;
+    background: rgba(0,0,0,0.6);
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-size: 10px;
+    color: #888;
+    font-family: monospace;
+    backdrop-filter: blur(4px);
+    pointer-events: none;
+  }
 </style>
 </head>
 <body>
@@ -75,6 +89,7 @@
   <div id="ui">
     <div id="status">🔍 Starting camera...</div>
   </div>
+  <div id="mode-badge">🖐️ TWO HAND MODE</div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
@@ -83,6 +98,7 @@ const video    = document.getElementById("video");
 const canvas   = document.getElementById("canvas");
 const ctx      = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
+const modeBadge = document.getElementById("mode-badge");
 
 const LERP         = 0.7;
 const FADE_FRAMES  = 8;
@@ -106,10 +122,15 @@ let pinchCooldown = 0;
 let cameraReady = false;
 let animationRunning = true;
 
+// Режимы: "two" или "single"
+let trackingMode = "two"; // по умолчанию две руки
+let singleHandData = null; // для хранения данных одной руки
+
 // Пасхалка Годжо
 let gojoModeActive = false;
 let gojoCooldown = 0;
 let gojoTimer = null;
+const GOJO_DURATION = 15000; // 15 секунд
 
 // Для плавного трекинга кончиков пальцев
 let smoothLeftTips = null;
@@ -150,17 +171,19 @@ function activateGojoMode() {
   
   gojoModeActive = true;
   
+  // Сохраняем старый эффект и включаем бесконечность
   const oldEffect = currentEffect;
-  currentEffect = 3;
+  currentEffect = 3; // pixelate
   
   document.body.classList.add('gojo-mode');
   statusEl.classList.add('gojo');
-  statusEl.textContent = "∞ RYŌIKI TENKAI — GOJO SATORU ∞";
+  statusEl.textContent = "∞ INFINITE VOID — GOJO SATORU ∞";
   
   const container = document.getElementById('container');
   container.classList.add('gojo-flash');
   setTimeout(() => container.classList.remove('gojo-flash'), 500);
   
+  // 15 секунд бесконечности
   if (gojoTimer) clearTimeout(gojoTimer);
   gojoTimer = setTimeout(() => {
     gojoModeActive = false;
@@ -171,7 +194,30 @@ function activateGojoMode() {
     statusEl.textContent = LABELS[eff];
     statusEl.className = "";
     gojoTimer = null;
-  }, 5000);
+    console.log("🔮 Бесконечность закончилась");
+  }, GOJO_DURATION);
+  
+  console.log("🔮 Активирована БЕСКОНЕЧНОСТЬ на 15 секунд!");
+}
+
+// ─────────────────────────────────────────────────────────────
+// Переключение режима (одна рука / две руки)
+// ─────────────────────────────────────────────────────────────
+
+function switchToSingleHand() {
+  trackingMode = "single";
+  modeBadge.innerHTML = "🖐️ SINGLE HAND MODE";
+  modeBadge.style.color = "#0f0";
+  statusEl.textContent = "🖐️ Show ONE hand";
+  console.log("Режим: одна рука");
+}
+
+function switchToTwoHands() {
+  trackingMode = "two";
+  modeBadge.innerHTML = "🖐️ TWO HAND MODE";
+  modeBadge.style.color = "#888";
+  statusEl.textContent = "✌️ Show both hands";
+  console.log("Режим: две руки");
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -201,7 +247,7 @@ function applyThreshold(d, m) {
 }
 
 function applyPixelate(d, m, w, h) {
-  const block = gojoModeActive ? 8 : 12;
+  const block = gojoModeActive ? 6 : 12; // в режиме бесконечности сильнее пикселизация
   for (let y = 0; y < h; y += block) {
     for (let x = 0; x < w; x += block) {
       const ci = (y * w + x) * 4;
@@ -212,9 +258,10 @@ function applyPixelate(d, m, w, h) {
       let r = d[si], g = d[si+1], b = d[si+2];
       
       if (gojoModeActive) {
-        r = Math.min(255, r + 80);
-        g = Math.min(255, g + 40);
-        b = Math.min(255, b + 150);
+        // Фиолетово-синий оттенок как бездна
+        r = Math.min(255, r + 100);
+        g = Math.min(255, g + 50);
+        b = Math.min(255, b + 200);
       }
       
       for (let dy = 0; dy < block && y+dy < h; dy++) {
@@ -228,7 +275,7 @@ function applyPixelate(d, m, w, h) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// ТРЕКИНГ ПАЛЬЦЕВ (новая хуйня)
+// ТРЕКИНГ ПАЛЬЦЕВ
 // ─────────────────────────────────────────────────────────────
 
 function getLm(lm, idx, w, h) {
@@ -272,20 +319,10 @@ function drawFingerTips(handData, color, w, h, handName) {
     ctx.lineWidth = 2;
     ctx.stroke();
     
-    // Подпись
     ctx.fillStyle = "white";
     ctx.font = "bold 10px monospace";
     ctx.shadowBlur = 0;
     ctx.fillText(`${handName} ${FINGER_NAMES[i]}`, tip.x - 20, tip.y - 10);
-    
-    // Рисуем линию от кончика к основанию (для красоты)
-    if (i === 0) {
-      ctx.beginPath();
-      ctx.moveTo(tip.x, tip.y);
-      ctx.lineTo(tip.x - 15, tip.y + 15);
-      ctx.strokeStyle = "rgba(255,255,255,0.5)";
-      ctx.stroke();
-    }
   });
 }
 
@@ -362,7 +399,7 @@ function drawOverlay(pts) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// MediaPipe callback
+// MediaPipe callback с поддержкой одной руки
 // ─────────────────────────────────────────────────────────────
 
 function onResults(results) {
@@ -382,6 +419,7 @@ function onResults(results) {
   let leftHandOnScreen = null;
   let rightHandOnScreen = null;
 
+  // Определяем руки по позиции на экране
   if (hands && hands.length >= 2) {
     const hand0x = hands[0][0].x;
     const hand1x = hands[1][0].x;
@@ -393,46 +431,71 @@ function onResults(results) {
       leftHandOnScreen = hands[1];
       rightHandOnScreen = hands[0];
     }
+  } else if (hands && hands.length === 1) {
+    // Если только одна рука - сохраняем её
+    singleHandData = hands[0];
+  } else {
+    singleHandData = null;
   }
 
-  // ========== ТРЕКИНГ КОНЧИКОВ ВСЕХ ПАЛЬЦЕВ ==========
+  // ========== АВТО-ПЕРЕКЛЮЧЕНИЕ МЕЖДУ РЕЖИМАМИ ==========
+  if (hands && hands.length === 2 && trackingMode !== "two") {
+    switchToTwoHands();
+  } else if (hands && hands.length === 1 && trackingMode !== "single") {
+    switchToSingleHand();
+  } else if ((!hands || hands.length === 0) && trackingMode !== "two") {
+    // Если рук нет, возвращаемся в режим двух рук по умолчанию
+    switchToTwoHands();
+  }
+
+  // ========== ТРЕКИНГ ПАЛЬЦЕВ ==========
   
-  if (leftHandOnScreen) {
-    // Рисуем скелет руки (опционально, закомментируй если не надо)
-    drawAllHandJoints(leftHandOnScreen, "rgba(0, 200, 255, 0.3)", w, h);
+  // Рисуем скелет и точки для рук (в зависимости от режима)
+  if (trackingMode === "two") {
+    if (leftHandOnScreen) {
+      drawAllHandJoints(leftHandOnScreen, "rgba(0, 200, 255, 0.3)", w, h);
+      const rawTips = getAllFingerTips(leftHandOnScreen, w, h);
+      smoothLeftTips = smoothFingerTips(smoothLeftTips, rawTips);
+      drawFingerTips(smoothLeftTips, "rgba(0, 200, 255, 0.9)", w, h, "← LEFT");
+    }
     
-    // Получаем и сглаживаем кончики пальцев
-    const rawTips = getAllFingerTips(leftHandOnScreen, w, h);
+    if (rightHandOnScreen) {
+      drawAllHandJoints(rightHandOnScreen, "rgba(255, 100, 150, 0.3)", w, h);
+      const rawTips = getAllFingerTips(rightHandOnScreen, w, h);
+      smoothRightTips = smoothFingerTips(smoothRightTips, rawTips);
+      drawFingerTips(smoothRightTips, "rgba(255, 100, 150, 0.9)", w, h, "RIGHT →");
+    }
+  } else if (trackingMode === "single" && singleHandData) {
+    // В режиме одной руки рисуем её золотым цветом
+    drawAllHandJoints(singleHandData, "rgba(255, 215, 0, 0.4)", w, h);
+    const rawTips = getAllFingerTips(singleHandData, w, h);
+    // Используем smoothLeftTips для хранения данных одной руки
     smoothLeftTips = smoothFingerTips(smoothLeftTips, rawTips);
-    
-    // Рисуем кончики пальцев левой руки
-    drawFingerTips(smoothLeftTips, "rgba(0, 200, 255, 0.9)", w, h, "← LEFT");
-  }
-  
-  if (rightHandOnScreen) {
-    drawAllHandJoints(rightHandOnScreen, "rgba(255, 100, 150, 0.3)", w, h);
-    
-    const rawTips = getAllFingerTips(rightHandOnScreen, w, h);
-    smoothRightTips = smoothFingerTips(smoothRightTips, rawTips);
-    
-    drawFingerTips(smoothRightTips, "rgba(255, 100, 150, 0.9)", w, h, "RIGHT →");
+    drawFingerTips(smoothLeftTips, "rgba(255, 215, 0, 0.9)", w, h, "👑 MAIN");
   }
 
-  // ПАСХАЛКА
+  // ========== ПАСХАЛКА (работает в любом режиме) ==========
   if (gojoCooldown > 0) gojoCooldown--;
   
-  if (hands && hands.length >= 1 && !gojoModeActive && gojoCooldown === 0) {
-    const leftGojo = leftHandOnScreen ? isGojoPose(leftHandOnScreen) : false;
-    const rightGojo = rightHandOnScreen ? isGojoPose(rightHandOnScreen) : false;
+  if (!gojoModeActive && gojoCooldown === 0) {
+    let isGojoPoseDetected = false;
     
-    if (leftGojo || rightGojo) {
+    if (trackingMode === "two" && leftHandOnScreen && rightHandOnScreen) {
+      isGojoPoseDetected = isGojoPose(leftHandOnScreen) || isGojoPose(rightHandOnScreen);
+    } else if (trackingMode === "single" && singleHandData) {
+      isGojoPoseDetected = isGojoPose(singleHandData);
+    }
+    
+    if (isGojoPoseDetected) {
       activateGojoMode();
-      gojoCooldown = 120;
+      gojoCooldown = 180; // кулдаун после активации
     }
   }
 
-  // Обычный режим с маской и эффектами
-  if (leftHandOnScreen && rightHandOnScreen && !gojoModeActive) {
+  // ========== МАСКА И ЭФФЕКТЫ ==========
+  
+  if (trackingMode === "two" && leftHandOnScreen && rightHandOnScreen && !gojoModeActive) {
+    // Обычный режим с двумя руками
     const leftThumb = getLmRaw(leftHandOnScreen, 4);
     const leftIndex = getLmRaw(leftHandOnScreen, 8);
     const leftPinch = dist(leftThumb, leftIndex) < PINCH_THRESH;
@@ -469,12 +532,39 @@ function onResults(results) {
     smoothPts = smoothPts ? lerpPts(smoothPts, target, LERP) : target;
     lastPts = [...smoothPts];
 
-    const eff = EFFECTS[currentEffect];
-    statusEl.textContent = LABELS[eff] + (bothPinch ? " 🤏" : " 👌");
-    statusEl.className = eff !== "none" ? "active" : "";
-    if (bothPinch) statusEl.classList.add("pinch");
-    else statusEl.classList.remove("pinch");
+    if (!gojoModeActive) {
+      const eff = EFFECTS[currentEffect];
+      statusEl.textContent = LABELS[eff] + (bothPinch ? " 🤏" : " 👌");
+      statusEl.className = eff !== "none" ? "active" : "";
+      if (bothPinch) statusEl.classList.add("pinch");
+      else statusEl.classList.remove("pinch");
+    }
 
+  } else if (trackingMode === "single" && singleHandData && !gojoModeActive) {
+    // Режим одной руки - создаём маску из большого и указательного
+    const thumb = getLm(singleHandData, 4, w, h);
+    const index = getLm(singleHandData, 8, w, h);
+    
+    // Для одной руки создаём прямоугольную маску вокруг пальцев
+    const centerX = (thumb.x + index.x) / 2;
+    const centerY = (thumb.y + index.y) / 2;
+    const width = Math.abs(thumb.x - index.x) * 2;
+    const height = Math.abs(thumb.y - index.y) * 2;
+    
+    const target = [
+      { x: centerX - width, y: centerY - height },
+      { x: centerX + width, y: centerY - height },
+      { x: centerX + width, y: centerY + height },
+      { x: centerX - width, y: centerY + height }
+    ];
+    
+    lostFrames = 0;
+    smoothPts = smoothPts ? lerpPts(smoothPts, target, LERP) : target;
+    lastPts = [...smoothPts];
+    
+    statusEl.textContent = "🖐️ ONE HAND MODE — pinch to switch";
+    statusEl.className = "";
+    
   } else if (!gojoModeActive) {
     lostFrames++;
     if (lostFrames < FADE_FRAMES && lastPts) {
@@ -484,15 +574,16 @@ function onResults(results) {
       lastPts = null;
     }
     
-    if (hands?.length === 1) {
-      statusEl.textContent = "✋ Show BOTH hands ✋";
+    if (trackingMode === "single") {
+      statusEl.textContent = "🖐️ Show ONE hand";
     } else {
-      statusEl.textContent = "✌️ Show both hands ✌️";
+      statusEl.textContent = "✌️ Show both hands";
     }
     statusEl.className = "";
     statusEl.classList.remove("pinch");
   }
 
+  // Применяем эффект
   const eff = gojoModeActive ? "pixelate" : EFFECTS[currentEffect];
   if (smoothPts && eff !== "none") {
     const imageData = ctx.getImageData(0, 0, w, h);
@@ -546,7 +637,7 @@ async function startCamera() {
               canvas.width = video.videoWidth;
               canvas.height = video.videoHeight;
               cameraReady = true;
-              statusEl.textContent = "✌️ Show both hands ✌️";
+              statusEl.textContent = "✌️ Show both hands";
               console.log(`✅ Camera ready: ${canvas.width}x${canvas.height}`);
               resolve();
             }
