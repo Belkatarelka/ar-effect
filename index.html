@@ -78,6 +78,16 @@ let gojoTimer     = 0;
 let effectLabelTimer = 0;
 let effectLabelText  = "";
 
+// Чёрная дыра
+let blackHoleActive = false;
+let blackHoleTimer  = 0;
+let blackHoleX      = 0;
+let blackHoleY      = 0;
+let blackHoleRadius = 0;
+const BLACK_HOLE_DURATION = 60 * 9; // ~9 секунд при 60fps
+const HANDS_CLOSE_THRESH  = 0.15;   // расстояние между запястьями в норм. координатах
+let handsCloseCooldown = 0;
+
 // Glitch state
 let glitchLines = [];
 function randomGlitchLines(w, h) {
@@ -485,6 +495,73 @@ function drawEffectLabel(pts) {
   ctx.restore();
 }
 
+// ── Чёрная дыра ──────────────────────────────────────
+function drawBlackHole(x, y, progress) {
+  const maxR = 120;
+  const r = blackHoleRadius;
+  const t = Date.now() / 1000;
+
+  // Внешнее свечение — аккреционный диск
+  const rings = 5;
+  for (let i=rings; i>=1; i--) {
+    const gr = ctx.createRadialGradient(x,y,r*0.5*i/rings, x,y,r*1.2*i/rings);
+    const alpha = (0.15 - i*0.02) * progress;
+    gr.addColorStop(0, `rgba(255,${100+i*20},0,${alpha})`);
+    gr.addColorStop(0.5, `rgba(180,0,255,${alpha*0.5})`);
+    gr.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.beginPath();
+    ctx.arc(x, y, r*1.2*i/rings, 0, Math.PI*2);
+    ctx.fillStyle = gr;
+    ctx.fill();
+  }
+
+  // Вращающиеся лучи диска
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(t * 2);
+  for (let i=0; i<12; i++) {
+    ctx.rotate(Math.PI*2/12);
+    ctx.beginPath();
+    ctx.moveTo(r*0.9, 0);
+    ctx.lineTo(r*1.6, 0);
+    ctx.strokeStyle = `rgba(255,${80+i*10},0,${0.12*progress})`;
+    ctx.lineWidth = 3+i%3;
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // Сама дыра — чёрный круг с градиентом
+  const gr2 = ctx.createRadialGradient(x,y,0, x,y,r);
+  gr2.addColorStop(0,   "rgba(0,0,0,1)");
+  gr2.addColorStop(0.7, "rgba(0,0,0,1)");
+  gr2.addColorStop(1,   "rgba(0,0,0,0)");
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI*2);
+  ctx.fillStyle = gr2;
+  ctx.fill();
+
+  // Лёгкое искажение вокруг — кольцо гравитационного линзирования
+  ctx.beginPath();
+  ctx.arc(x, y, r*1.05, 0, Math.PI*2);
+  ctx.strokeStyle = `rgba(255,255,255,${0.3*progress})`;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Внутренние спиральные штрихи
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(-t * 3);
+  for (let i=0; i<8; i++) {
+    ctx.rotate(Math.PI*2/8);
+    ctx.beginPath();
+    ctx.arc(r*0.6, 0, r*0.15, 0, Math.PI);
+    ctx.strokeStyle = `rgba(100,0,200,${0.4*progress})`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 // ── Главный callback ──────────────────────────────────
 
 function onResults(results) {
@@ -525,10 +602,44 @@ function onResults(results) {
   const gojoRight = rightHand ? detectGojo(rightHand) : false;
   if (gojoLeft && gojoRight) {
     gojoActive = true;
-    gojoTimer  = 60; // держим 60 кадров после того как жест пропал
+    gojoTimer  = 60;
   } else if (gojoTimer > 0) {
     gojoTimer--;
     if (gojoTimer === 0) gojoActive = false;
+  }
+
+  // ── Чёрная дыра: обе ладони близко
+  if (leftHand && rightHand && !blackHoleActive) {
+    const lWrist = getLmRaw(leftHand,  0);
+    const rWrist = getLmRaw(rightHand, 0);
+    const handsDist = Math.hypot(lWrist.x-rWrist.x, lWrist.y-rWrist.y);
+    if (handsCloseCooldown > 0) handsCloseCooldown--;
+    if (handsDist < HANDS_CLOSE_THRESH && handsCloseCooldown === 0) {
+      blackHoleActive = true;
+      blackHoleTimer  = BLACK_HOLE_DURATION;
+      handsCloseCooldown = BLACK_HOLE_DURATION + 60;
+      // Позиция — между запястьями
+      const lW = getLm(leftHand,  0, w, h);
+      const rW = getLm(rightHand, 0, w, h);
+      blackHoleX = (lW.x + rW.x) / 2;
+      blackHoleY = (lW.y + rW.y) / 2;
+      blackHoleRadius = 0;
+    }
+  }
+
+  // Обновляем чёрную дыру
+  if (blackHoleActive) {
+    blackHoleTimer--;
+    const progress = blackHoleTimer / BLACK_HOLE_DURATION;
+    // Радиус растёт и потом схлопывается
+    if (progress > 0.8) {
+      blackHoleRadius = (1 - progress) / 0.2 * 100; // появление
+    } else if (progress > 0.15) {
+      blackHoleRadius = 100; // полный размер
+    } else {
+      blackHoleRadius = progress / 0.15 * 100; // схлопывание
+    }
+    if (blackHoleTimer <= 0) blackHoleActive = false;
   }
 
   // ── Маска ────────────────────────────────────────────
@@ -539,8 +650,8 @@ function onResults(results) {
     // Кулак на любой руке = переключение эффекта
     const lFist=isFist(leftHand);
     const rFist=isFist(rightHand);
-    const anyFist=lFist||rFist;
-    const bothPinch=false; // не используется для переключения
+    const anyFist=lFist&&rFist; // два кулака одновременно
+    const bothPinch=false;
 
     if (pinchCooldown>0) pinchCooldown--;
     if (anyFist&&!pinchActive&&pinchCooldown===0) {
@@ -603,6 +714,12 @@ function onResults(results) {
   }
 
   // ── Рендер эффекта ────────────────────────────────────
+  // Рисуем чёрную дыру поверх всего
+  if (blackHoleActive) {
+    const progress = blackHoleTimer / BLACK_HOLE_DURATION;
+    drawBlackHole(blackHoleX, blackHoleY, progress);
+  }
+
   const eff=EFFECTS[currentEffect];
   if (smoothPts) {
     if (gojoActive) {
