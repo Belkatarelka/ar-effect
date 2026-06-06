@@ -51,8 +51,9 @@ const statusEl = document.getElementById("status");
 
 const LERP           = 0.7;
 const FADE_FRAMES    = 8;
-const PINCH_THRESH   = 0.06;
+const PINCH_THRESH   = 0.06; // оставляем для обратной совместимости
 const PINCH_COOLDOWN = 20;
+const FIST_THRESH    = 0.12; // порог кулака: кончики пальцев близко к ладони
 const FINGER_LERP    = 0.5;
 const FINGER_TIPS    = [4, 8, 12, 16, 20];
 const FINGER_NAMES   = ["T","I","M","R","P"];
@@ -353,6 +354,23 @@ function getLmRaw(lm, idx) {
 
 function dist(a, b) { return Math.hypot(a.x-b.x, a.y-b.y); }
 
+// Кулак: все 4 пальца (не большой) согнуты — кончики близко к основаниям
+function isFist(lm) {
+  const tips = [8, 12, 16, 20];   // указательный, средний, безымянный, мизинец
+  const bases= [5,  9, 13, 17];   // основания тех же пальцев
+  const wrist = lm[0];
+  let curled = 0;
+  for (let i=0; i<tips.length; i++) {
+    const tip  = lm[tips[i]];
+    const base = lm[bases[i]];
+    // Кончик пальца ближе к запястью чем основание — палец согнут
+    const dTip  = Math.hypot(tip.x-wrist.x,  tip.y-wrist.y);
+    const dBase = Math.hypot(base.x-wrist.x, base.y-wrist.y);
+    if (dTip < dBase * 1.05) curled++;
+  }
+  return curled >= 3; // хватит 3 из 4 чтобы не быть слишком строгим
+}
+
 function getAllFingerTips(lm, w, h) {
   return FINGER_TIPS.map(idx => ({
     idx, x:(1-lm[idx].x)*w, y:lm[idx].y*h
@@ -518,18 +536,19 @@ function onResults(results) {
     const lThumb=getLm(leftHand,4,w,h), lIndex=getLm(leftHand,8,w,h);
     const rThumb=getLm(rightHand,4,w,h), rIndex=getLm(rightHand,8,w,h);
 
-    // Щипок
-    const lPinch=dist(getLmRaw(leftHand,4),getLmRaw(leftHand,8))<PINCH_THRESH;
-    const rPinch=dist(getLmRaw(rightHand,4),getLmRaw(rightHand,8))<PINCH_THRESH;
-    const bothPinch=lPinch&&rPinch;
+    // Кулак на любой руке = переключение эффекта
+    const lFist=isFist(leftHand);
+    const rFist=isFist(rightHand);
+    const anyFist=lFist||rFist;
+    const bothPinch=false; // не используется для переключения
 
     if (pinchCooldown>0) pinchCooldown--;
-    if (bothPinch&&!pinchActive&&pinchCooldown===0) {
+    if (anyFist&&!pinchActive&&pinchCooldown===0) {
       currentEffect=(currentEffect+1)%EFFECTS.length;
       pinchActive=true; pinchCooldown=PINCH_COOLDOWN;
       effectLabelText=LABELS[EFFECTS[currentEffect]];
       effectLabelTimer=40;
-    } else if (!bothPinch) pinchActive=false;
+    } else if (!anyFist) pinchActive=false;
 
     const target=getRotatedRect(lThumb,lIndex,rThumb,rIndex);
     lostFrames=0;
@@ -541,7 +560,7 @@ function onResults(results) {
       statusEl.textContent="∞ MURASAKI — HOLLOW PURPLE";
       statusEl.className="gojo";
     } else {
-      statusEl.textContent=LABELS[eff]+(bothPinch?" [PINCH]":"");
+      statusEl.textContent=LABELS[eff]+(anyFist?" [FIST]":"");
       statusEl.className=eff!=="none"?"active":"";
     }
 
@@ -550,15 +569,15 @@ function onResults(results) {
     const thumb=getLm(hand,4,w,h), index=getLm(hand,8,w,h);
     const cx=(thumb.x+index.x)/2, cy=(thumb.y+index.y)/2;
 
-    // Одноручный щипок — переключение эффекта
-    const onePinch=dist(getLmRaw(hand,4),getLmRaw(hand,8))<PINCH_THRESH;
+    // Кулак одной руки = переключение эффекта
+    const oneFist=isFist(hand);
     if (pinchCooldown>0) pinchCooldown--;
-    if (onePinch&&!pinchActive&&pinchCooldown===0) {
+    if (oneFist&&!pinchActive&&pinchCooldown===0) {
       currentEffect=(currentEffect+1)%EFFECTS.length;
       pinchActive=true; pinchCooldown=PINCH_COOLDOWN;
       effectLabelText=LABELS[EFFECTS[currentEffect]];
       effectLabelTimer=40;
-    } else if (!onePinch) pinchActive=false;
+    } else if (!oneFist) pinchActive=false;
 
     // Масштаб по осям: горизонтальный разброс = ширина, вертикальный = высота
     const dx=Math.abs(thumb.x-index.x);
@@ -573,7 +592,7 @@ function onResults(results) {
     smoothPts=smoothPts?lerpPts(smoothPts,target,LERP):target;
     lastPts=[...smoothPts];
     const eff=EFFECTS[currentEffect];
-    statusEl.textContent="ONE HAND: "+LABELS[eff]+(onePinch?" [PINCH]":"");
+    statusEl.textContent="ONE HAND: "+LABELS[eff]+(oneFist?" [FIST]":"");
     statusEl.className=eff!=="none"?"active":"";
   } else {
     lostFrames++;
