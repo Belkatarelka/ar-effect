@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AR Effect</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>AR Effect — Both Hands</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -22,6 +22,7 @@
     object-fit: cover;
     transform: scaleX(-1);
     opacity: 0;
+    pointer-events: none;
   }
   #canvas {
     position: absolute;
@@ -32,18 +33,24 @@
     position: absolute;
     top: 16px; left: 16px;
     z-index: 10;
+    pointer-events: none;
   }
   #status {
     font-size: 12px;
     letter-spacing: 0.15em;
     text-transform: uppercase;
-    padding: 6px 12px;
-    background: rgba(0,0,0,0.6);
-    border-left: 2px solid #555;
+    padding: 8px 16px;
+    background: rgba(0,0,0,0.7);
+    border-left: 3px solid #555;
     color: #aaa;
     transition: all 0.2s;
+    backdrop-filter: blur(8px);
+    border-radius: 0 8px 8px 0;
+    font-weight: bold;
+    pointer-events: none;
   }
-  #status.active { color: #fff; border-left-color: #fff; }
+  #status.active { color: #0f0; border-left-color: #0f0; }
+  #status.pinch { background: rgba(0,255,0,0.2); color: #fff; }
 </style>
 </head>
 <body>
@@ -51,7 +58,7 @@
   <video id="video" playsinline autoplay muted></video>
   <canvas id="canvas"></canvas>
   <div id="ui">
-    <div id="status">Show both hands</div>
+    <div id="status">🔍 Starting camera...</div>
   </div>
 </div>
 
@@ -64,25 +71,29 @@ const statusEl = document.getElementById("status");
 
 const LERP         = 0.7;
 const FADE_FRAMES  = 8;
-const PINCH_THRESH = 0.06;  // порог щипка в нормализованных координатах
-const PINCH_COOLDOWN = 20;  // кадров между переключениями
+const PINCH_THRESH = 0.06;
+const PINCH_COOLDOWN = 20;
 
 const EFFECTS = ["none", "posterize", "threshold", "pixelate"];
 const LABELS  = {
-  none:      "— No Effect —",
-  posterize: "Posterize",
-  threshold: "Threshold",
-  pixelate:  "Pixelate",
+  none:      "✨ NO EFFECT",
+  posterize: "🎨 POSTERIZE",
+  threshold: "⚫ THRESHOLD",
+  pixelate:  "🔲 PIXELATE",
 };
 
-let currentEffect = 0;  // индекс в EFFECTS
+let currentEffect = 0;
 let smoothPts  = null;
 let lastPts    = null;
 let lostFrames = 0;
-let pinchActive   = false;  // сейчас зажат щипок
-let pinchCooldown = 0;      // cooldown чтобы не переключало несколько раз подряд
+let pinchActive   = false;
+let pinchCooldown = 0;
+let cameraReady = false;
+let animationRunning = true;
 
-// ── Эффекты ──────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// Эффекты
+// ─────────────────────────────────────────────────────────────
 
 function applyPosterize(d, m) {
   const levels = 4;
@@ -126,7 +137,9 @@ function applyPixelate(d, m, w, h) {
   }
 }
 
-// ── Вспомогательные ──────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// Вспомогательные функции
+// ─────────────────────────────────────────────────────────────
 
 function getLm(lm, idx, w, h) {
   return { x: lm[idx].x * w, y: lm[idx].y * h };
@@ -145,11 +158,11 @@ function stableCorners(p1, p2) {
 }
 
 function lerpPt(a, b, t) {
-  return { x: a.x+(b.x-a.x)*t, y: a.y+(b.y-a.y)*t };
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
 }
 
 function lerpPts(cur, tgt, t) {
-  return cur.map((p,i) => lerpPt(p, tgt[i], t));
+  return cur.map((p, i) => lerpPt(p, tgt[i], t));
 }
 
 function buildMask(pts) {
@@ -167,105 +180,138 @@ function buildMask(pts) {
 }
 
 function drawOverlay(pts) {
-  ctx.strokeStyle = "rgba(255,255,255,0.7)";
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(255,255,255,0.9)";
+  ctx.lineWidth = 3;
+  ctx.shadowBlur = 0;
   ctx.beginPath();
   ctx.moveTo(pts[0].x, pts[0].y);
   pts.forEach(p => ctx.lineTo(p.x, p.y));
   ctx.closePath();
   ctx.stroke();
+  
   pts.forEach(p => {
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 6, 0, Math.PI*2);
-    ctx.fillStyle = "rgba(0,180,255,0.9)";
+    ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(0, 200, 255, 0.8)";
     ctx.fill();
+    ctx.strokeStyle = "white";
+    ctx.lineWidth = 2;
+    ctx.stroke();
   });
 }
 
-// ── MediaPipe callback ────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// MediaPipe callback — ГЛАВНЫЙ ФИКС: определяем руки по координатам
+// ─────────────────────────────────────────────────────────────
 
 function onResults(results) {
-  const w = canvas.width, h = canvas.height;
+  if (!cameraReady) return;
+  
+  const w = canvas.width;
+  const h = canvas.height;
+  if (w === 0 || h === 0) return;
 
+  // Отрисовка видео на canvas с зеркалированием
   ctx.save();
   ctx.scale(-1, 1);
   ctx.drawImage(results.image, -w, 0, w, h);
   ctx.restore();
 
-  const hands      = results.multiHandLandmarks;
-  const handedness = results.multiHandedness;
+  const hands = results.multiHandLandmarks;
+  
+  let leftHand = null;
+  let rightHand = null;
 
-  let leftLm  = null;
-  let rightLm = null;
-
+  // ФИКС: определяем руки по x-координате (левая = та, что левее на экране)
   if (hands && hands.length === 2) {
-    for (let i = 0; i < hands.length; i++) {
-      if (handedness[i].label === "Left")  rightLm = hands[i];
-      else                                  leftLm  = hands[i];
+    const hand0x = hands[0][0].x;  // запястье
+    const hand1x = hands[1][0].x;
+    
+    if (hand0x < hand1x) {
+      leftHand = hands[0];
+      rightHand = hands[1];
+    } else {
+      leftHand = hands[1];
+      rightHand = hands[0];
     }
   }
 
-  if (leftLm && rightLm) {
-    // ── Определяем щипок: расстояние между большим(4) и указательным(8) на обеих руках
-    const lThumb = getLmRaw(leftLm,  4);
-    const lIndex = getLmRaw(leftLm,  8);
-    const rThumb = getLmRaw(rightLm, 4);
-    const rIndex = getLmRaw(rightLm, 8);
+  // Если есть обе руки
+  if (leftHand && rightHand) {
+    // Щипок на левой руке (большой + указательный)
+    const lThumb = getLmRaw(leftHand, 4);
+    const lIndex = getLmRaw(leftHand, 8);
+    // Щипок на правой руке
+    const rThumb = getLmRaw(rightHand, 4);
+    const rIndex = getLmRaw(rightHand, 8);
 
     const lPinch = dist(lThumb, lIndex) < PINCH_THRESH;
     const rPinch = dist(rThumb, rIndex) < PINCH_THRESH;
     const bothPinch = lPinch && rPinch;
 
+    // Кулдаун для переключения эффектов
     if (pinchCooldown > 0) pinchCooldown--;
 
     if (bothPinch && !pinchActive && pinchCooldown === 0) {
-      // Щипок зажат — переключаем эффект
       currentEffect = (currentEffect + 1) % EFFECTS.length;
-      pinchActive   = true;
+      pinchActive = true;
       pinchCooldown = PINCH_COOLDOWN;
+      
+      // Визуальный фидбек
+      statusEl.style.transform = "scale(1.05)";
+      setTimeout(() => { statusEl.style.transform = ""; }, 150);
     } else if (!bothPinch) {
       pinchActive = false;
     }
 
-    // ── Точки области: большой(4) и указательный(8)
-    const lP1 = getLm(leftLm,  4, w, h);
-    const lP2 = getLm(leftLm,  8, w, h);
-    const rP1 = getLm(rightLm, 4, w, h);
-    const rP2 = getLm(rightLm, 8, w, h);
+    // Точки для маски: большой(4) и указательный(8) пальцы на каждой руке
+    const lP1 = getLm(leftHand, 4, w, h);
+    const lP2 = getLm(leftHand, 8, w, h);
+    const rP1 = getLm(rightHand, 4, w, h);
+    const rP2 = getLm(rightHand, 8, w, h);
 
     const [lTop, lBot] = stableCorners(lP1, lP2);
     const [rTop, rBot] = stableCorners(rP1, rP2);
     const target = [lTop, rTop, rBot, lBot];
 
     lostFrames = 0;
-    smoothPts  = smoothPts ? lerpPts(smoothPts, target, LERP) : target;
-    lastPts    = [...smoothPts];
+    smoothPts = smoothPts ? lerpPts(smoothPts, target, LERP) : target;
+    lastPts = [...smoothPts];
 
     const eff = EFFECTS[currentEffect];
-    statusEl.textContent = LABELS[eff] + (bothPinch ? " ●" : "");
-    statusEl.className   = eff !== "none" ? "active" : "";
+    statusEl.textContent = LABELS[eff] + (bothPinch ? " 🤏" : " 👌");
+    statusEl.className = eff !== "none" ? "active" : "";
+    if (bothPinch) statusEl.classList.add("pinch");
+    else statusEl.classList.remove("pinch");
 
   } else {
+    // Руки потеряны
     lostFrames++;
     if (lostFrames < FADE_FRAMES && lastPts) {
       smoothPts = lastPts;
     } else {
       smoothPts = null;
-      lastPts   = null;
+      lastPts = null;
     }
-    statusEl.textContent = "Show both hands";
-    statusEl.className   = "";
+    
+    if (hands?.length === 1) {
+      statusEl.textContent = "✋ Show BOTH hands ✋";
+    } else {
+      statusEl.textContent = "✌️ Show both hands ✌️";
+    }
+    statusEl.className = "";
+    statusEl.classList.remove("pinch");
   }
 
-  // ── Рендер эффекта
+  // Применяем эффект внутри маски
   const eff = EFFECTS[currentEffect];
   if (smoothPts && eff !== "none") {
     const imageData = ctx.getImageData(0, 0, w, h);
-    const mask      = buildMask(smoothPts);
+    const mask = buildMask(smoothPts);
 
     if (eff === "posterize") applyPosterize(imageData.data, mask);
     if (eff === "threshold") applyThreshold(imageData.data, mask);
-    if (eff === "pixelate")  applyPixelate(imageData.data, mask, w, h);
+    if (eff === "pixelate") applyPixelate(imageData.data, mask, w, h);
 
     ctx.putImageData(imageData, 0, 0);
     drawOverlay(smoothPts);
@@ -274,7 +320,9 @@ function onResults(results) {
   }
 }
 
-// ── Инициализация ─────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// Инициализация MediaPipe
+// ─────────────────────────────────────────────────────────────
 
 const handsDetector = new Hands({
   locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
@@ -283,34 +331,86 @@ const handsDetector = new Hands({
 handsDetector.setOptions({
   maxNumHands: 2,
   modelComplexity: 1,
-  minDetectionConfidence: 0.4,
-  minTrackingConfidence: 0.4,
+  minDetectionConfidence: 0.5,
+  minTrackingConfidence: 0.5,
 });
 
 handsDetector.onResults(onResults);
 
+// ─────────────────────────────────────────────────────────────
+// Запуск камеры с защитой от черного экрана
+// ─────────────────────────────────────────────────────────────
+
 async function startCamera() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }
+      video: {
+        facingMode: "user",
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      }
     });
     video.srcObject = stream;
-    video.onloadedmetadata = () => {
-      canvas.width  = video.videoWidth;
-      canvas.height = video.videoHeight;
-      loop();
-    };
-  } catch(e) {
+    
+    return new Promise((resolve) => {
+      video.onloadedmetadata = () => {
+        video.play().then(() => {
+          // Ждём реальных кадров
+          const checkReady = setInterval(() => {
+            if (video.videoWidth > 0 && video.videoHeight > 0) {
+              clearInterval(checkReady);
+              canvas.width = video.videoWidth;
+              canvas.height = video.videoHeight;
+              cameraReady = true;
+              statusEl.textContent = "✌️ Show both hands ✌️";
+              console.log(`✅ Camera ready: ${canvas.width}x${canvas.height}`);
+              resolve();
+            }
+          }, 100);
+        });
+      };
+    });
+  } catch (e) {
+    console.error("Camera error:", e);
+    statusEl.textContent = "❌ Camera error: " + e.message;
     alert("Camera error: " + e.message);
   }
 }
 
+// ─────────────────────────────────────────────────────────────
+// Главный цикл с авто-подстройкой размера canvas
+// ─────────────────────────────────────────────────────────────
+
 async function loop() {
-  await handsDetector.send({ image: video });
+  if (!animationRunning) return;
+  
+  if (cameraReady && video.readyState >= 2) {
+    // Авто-подстройка размера canvas если видео изменило разрешение
+    if (video.videoWidth !== canvas.width && video.videoWidth > 0) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      console.log(`🔄 Canvas resized to ${canvas.width}x${canvas.height}`);
+    }
+    await handsDetector.send({ image: video });
+  }
   requestAnimationFrame(loop);
 }
 
-startCamera();
+// Старт
+startCamera().then(() => {
+  loop();
+}).catch(e => {
+  console.error("Start failed:", e);
+});
+
+// Очистка при выгрузке страницы
+window.addEventListener("beforeunload", () => {
+  animationRunning = false;
+  if (video.srcObject) {
+    const tracks = video.srcObject.getTracks();
+    tracks.forEach(track => track.stop());
+  }
+});
 </script>
 </body>
 </html>
