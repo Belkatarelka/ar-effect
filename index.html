@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AR Effect</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+ 
+  body {
+    background: #000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: monospace;
+    color: #fff;
+    overflow: hidden;
+  }
+ 
+  #container {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+  }
+ 
+  #video {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+    opacity: 0;
+  }
+ 
+  #canvas {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+ 
+  #ui {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+ 
+  #status {
+    font-size: 13px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: #aaa;
+    background: rgba(0,0,0,0.5);
+    padding: 6px 12px;
+    border-left: 2px solid #555;
+  }
+ 
+  #status.active {
+    color: #fff;
+    border-left-color: #fff;
+  }
+ 
+  #hint {
+    font-size: 11px;
+    color: #555;
+    letter-spacing: 0.1em;
+    background: rgba(0,0,0,0.4);
+    padding: 4px 12px;
+  }
+</style>
+</head>
+<body>
+ 
+<div id="container">
+  <video id="video" playsinline autoplay muted></video>
+  <canvas id="canvas"></canvas>
+  <div id="ui">
+    <div id="status">Loading...</div>
+    <div id="hint">Show both hands — thumb + index finger</div>
+  </div>
+</div>
+ 
+<!-- MediaPipe Hands -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+ 
+<script>
+const video   = document.getElementById("video");
+const canvas  = document.getElementById("canvas");
+const ctx     = canvas.getContext("2d");
+const statusEl = document.getElementById("status");
+ 
+// ── Состояние
+let smoothPts  = null;
+let lastPts    = null;
+let lostFrames = 0;
+const LERP        = 0.4;
+const FADE_FRAMES = 8;
+ 
+// ── Вспомогательные функции
+function lerpPt(a, b, t) {
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+ 
+function lerpPts(cur, tgt, t) {
+  return cur.map((p, i) => lerpPt(p, tgt[i], t));
+}
+ 
+function stableCorners(p1, p2) {
+  // верхняя точка (меньше Y) первая
+  return p1.y < p2.y ? [p1, p2] : [p2, p1];
+}
+ 
+function getLandmark(landmarks, idx, w, h) {
+  return { x: landmarks[idx].x * w, y: landmarks[idx].y * h };
+}
+ 
+// ── Применить ЧБ внутри четырёхугольника
+function applyBWRegion(pts) {
+  const w = canvas.width;
+  const h = canvas.height;
+ 
+  // Сохраняем текущий кадр
+  const imageData = ctx.getImageData(0, 0, w, h);
+  const data = imageData.data;
+ 
+  // Создаём off-screen canvas для маски
+  const offCanvas = document.createElement("canvas");
+  offCanvas.width  = w;
+  offCanvas.height = h;
+  const offCtx = offCanvas.getContext("2d");
+ 
+  // Рисуем четырёхугольник как маску
+  offCtx.fillStyle = "#fff";
+  offCtx.beginPath();
+  offCtx.moveTo(pts[0].x, pts[0].y);
+  offCtx.lineTo(pts[1].x, pts[1].y);
+  offCtx.lineTo(pts[2].x, pts[2].y);
+  offCtx.lineTo(pts[3].x, pts[3].y);
+  offCtx.closePath();
+  offCtx.fill();
+ 
+  const maskData = offCtx.getImageData(0, 0, w, h).data;
+ 
+  // Применяем ЧБ только там где маска белая
+  for (let i = 0; i < data.length; i += 4) {
+    if (maskData[i] > 128) {
+      const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
+      data[i]   = gray;
+      data[i+1] = gray;
+      data[i+2] = gray;
+    }
+  }
+ 
+  ctx.putImageData(imageData, 0, 0);
+ 
+  // Рисуем контур и точки
+  ctx.strokeStyle = "rgba(255,255,255,0.8)";
+  ctx.lineWidth   = 2;
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  pts.forEach(p => ctx.lineTo(p.x, p.y));
+  ctx.closePath();
+  ctx.stroke();
+ 
+  pts.forEach(p => {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(0, 180, 255, 0.9)";
+    ctx.fill();
+  });
+}
+ 
+// ── Callback MediaPipe
+function onResults(results) {
+  const w = canvas.width;
+  const h = canvas.height;
+ 
+  // Рисуем видео (зеркалим)
+  ctx.save();
+  ctx.scale(-1, 1);
+  ctx.drawImage(results.image, -w, 0, w, h);
+  ctx.restore();
+ 
+  const hands = results.multiHandLandmarks;
+  const handedness = results.multiHandedness;
+ 
+  let leftPts  = null;
+  let rightPts = null;
+ 
+  if (hands && hands.length === 2) {
+    for (let i = 0; i < hands.length; i++) {
+      const label = handedness[i].label; // "Left" или "Right"
+      const lm    = hands[i];
+      const thumb = getLandmark(lm, 4,  w, h);
+      const index = getLandmark(lm, 8,  w, h);
+ 
+      // После флипа Left/Right меняются
+      if (label === "Left")  rightPts = [thumb, index];
+      else                   leftPts  = [thumb, index];
+    }
+  }
+ 
+  // ── Обновляем точки
+  if (leftPts && rightPts) {
+    lostFrames = 0;
+    statusEl.textContent = "EFFECT: ON";
+    statusEl.className   = "active";
+ 
+    const [lTop, lBot] = stableCorners(leftPts[0],  leftPts[1]);
+    const [rTop, rBot] = stableCorners(rightPts[0], rightPts[1]);
+    const target = [lTop, rTop, rBot, lBot];
+ 
+    if (!smoothPts) {
+      smoothPts = target;
+    } else {
+      smoothPts = lerpPts(smoothPts, target, LERP);
+    }
+    lastPts = [...smoothPts];
+ 
+  } else {
+    lostFrames++;
+    statusEl.textContent = "EFFECT: OFF";
+    statusEl.className   = "";
+ 
+    if (lostFrames < FADE_FRAMES && lastPts) {
+      smoothPts = lastPts;
+    } else {
+      smoothPts = null;
+      lastPts   = null;
+    }
+  }
+ 
+  // ── Рендер эффекта
+  if (smoothPts) {
+    applyBWRegion(smoothPts);
+  }
+}
+ 
+// ── Инициализация MediaPipe Hands
+const handsDetector = new Hands({
+  locateFile: (file) =>
+    `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+});
+ 
+handsDetector.setOptions({
+  maxNumHands:           2,
+  modelComplexity:       0,
+  minDetectionConfidence: 0.3,
+  minTrackingConfidence:  0.3,
+});
+ 
+handsDetector.onResults(onResults);
+ 
+// ── Камера
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } }
+    });
+    video.srcObject = stream;
+    video.onloadedmetadata = () => {
+      canvas.width  = video.videoWidth;
+      canvas.height = video.videoHeight;
+      statusEl.textContent = "EFFECT: OFF";
+      processFrame();
+    };
+  } catch (e) {
+    statusEl.textContent = "Camera error: " + e.message;
+  }
+}
+ 
+// ── Основной цикл
+async function processFrame() {
+  await handsDetector.send({ image: video });
+  requestAnimationFrame(processFrame);
+}
+ 
+startCamera();
+</script>
+</body>
+</html>
+ 
