@@ -62,7 +62,7 @@ const canvas   = document.getElementById("canvas");
 const ctx      = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
 
-const LERP         = 0.4;
+const LERP         = 0.7;
 const FADE_FRAMES  = 8;
 const PINCH_THRESH = 0.06;  // порог щипка в нормализованных координатах
 const PINCH_COOLDOWN = 20;  // кадров между переключениями
@@ -292,7 +292,7 @@ handsDetector.onResults(onResults);
 async function startCamera() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } }
+      video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }
     });
     video.srcObject = stream;
     video.onloadedmetadata = () => {
@@ -307,7 +307,7 @@ async function startCamera() {
 
 async function loop() {
   await handsDetector.send({ image: video });
-  requestAnimationFrame(loop);
+  loop();
 }
 
 startCamera();
