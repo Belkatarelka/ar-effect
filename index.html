@@ -6,259 +6,282 @@
 <title>AR Effect</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
- 
   body {
     background: #000;
     display: flex;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
     min-height: 100vh;
     font-family: monospace;
-    color: #fff;
     overflow: hidden;
   }
- 
-  #container {
-    position: relative;
-    width: 100vw;
-    height: 100vh;
-  }
- 
+  #container { position: relative; width: 100vw; height: 100vh; }
   #video {
     position: absolute;
-    width: 100%;
-    height: 100%;
+    width: 100%; height: 100%;
     object-fit: cover;
     transform: scaleX(-1);
     opacity: 0;
   }
- 
   #canvas {
     position: absolute;
-    width: 100%;
-    height: 100%;
+    width: 100%; height: 100%;
     object-fit: cover;
   }
- 
   #ui {
     position: absolute;
-    top: 20px;
-    left: 20px;
+    top: 16px; left: 16px;
     z-index: 10;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
   }
- 
-  #status {
-    font-size: 13px;
-    letter-spacing: 0.15em;
-    text-transform: uppercase;
-    color: #aaa;
-    background: rgba(0,0,0,0.5);
-    padding: 6px 12px;
-    border-left: 2px solid #555;
-  }
- 
-  #status.active {
-    color: #fff;
-    border-left-color: #fff;
-  }
- 
-  #hint {
+  .tag {
     font-size: 11px;
-    color: #555;
-    letter-spacing: 0.1em;
-    background: rgba(0,0,0,0.4);
-    padding: 4px 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    border-left: 2px solid #444;
+    color: #666;
+    background: rgba(0,0,0,0.5);
+    transition: color 0.2s, border-color 0.2s;
   }
+  .tag.on { color: #fff; border-left-color: #fff; }
 </style>
 </head>
 <body>
- 
 <div id="container">
   <video id="video" playsinline autoplay muted></video>
   <canvas id="canvas"></canvas>
   <div id="ui">
-    <div id="status">Loading...</div>
-    <div id="hint">Show both hands — thumb + index finger</div>
+    <div class="tag" id="t1">Thumb+Index — Posterize</div>
+    <div class="tag" id="t2">Index+Middle — Threshold</div>
+    <div class="tag" id="t3">Ring+Pinky — Pixelate</div>
   </div>
 </div>
- 
-<!-- MediaPipe Hands -->
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
- 
 <script>
-const video   = document.getElementById("video");
-const canvas  = document.getElementById("canvas");
-const ctx     = canvas.getContext("2d");
-const statusEl = document.getElementById("status");
- 
-// ── Состояние
-let smoothPts  = null;
-let lastPts    = null;
-let lostFrames = 0;
+const video  = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx    = canvas.getContext("2d");
+
 const LERP        = 0.4;
 const FADE_FRAMES = 8;
- 
-// ── Вспомогательные функции
+
+// Три независимых состояния
+const effects = [
+  { id: "t1", smooth: null, last: null, lost: 0, fingers: [4, 8],   fn: posterize },
+  { id: "t2", smooth: null, last: null, lost: 0, fingers: [8, 12],  fn: threshold },
+  { id: "t3", smooth: null, last: null, lost: 0, fingers: [16, 20], fn: pixelate  },
+];
+
+// ── Эффекты ──────────────────────────────────────────
+
+function posterize(imageData, maskData) {
+  const d = imageData.data;
+  const m = maskData.data;
+  const levels = 4;
+  const step = 255 / (levels - 1);
+  for (let i = 0; i < d.length; i += 4) {
+    if (m[i] > 128) {
+      d[i]   = Math.round(Math.round(d[i]   / step) * step);
+      d[i+1] = Math.round(Math.round(d[i+1] / step) * step);
+      d[i+2] = Math.round(Math.round(d[i+2] / step) * step);
+    }
+  }
+}
+
+function threshold(imageData, maskData) {
+  const d = imageData.data;
+  const m = maskData.data;
+  for (let i = 0; i < d.length; i += 4) {
+    if (m[i] > 128) {
+      const gray = d[i] * 0.299 + d[i+1] * 0.587 + d[i+2] * 0.114;
+      const val  = gray > 128 ? 255 : 0;
+      d[i] = d[i+1] = d[i+2] = val;
+    }
+  }
+}
+
+function pixelate(imageData, maskData) {
+  const d = imageData.data;
+  const m = maskData.data;
+  const w = canvas.width;
+  const h = canvas.height;
+  const block = 16;
+
+  for (let y = 0; y < h; y += block) {
+    for (let x = 0; x < w; x += block) {
+      const ci = (y * w + x) * 4;
+      if (m[ci] <= 128) continue;
+      // Берём цвет из центра блока
+      const cx = Math.min(x + block / 2, w - 1);
+      const cy = Math.min(y + block / 2, h - 1);
+      const si = (Math.floor(cy) * w + Math.floor(cx)) * 4;
+      const r = d[si], g = d[si+1], b = d[si+2];
+      // Заливаем весь блок
+      for (let dy = 0; dy < block && y + dy < h; dy++) {
+        for (let dx = 0; dx < block && x + dx < w; dx++) {
+          const pi = ((y + dy) * w + (x + dx)) * 4;
+          if (m[pi] > 128) {
+            d[pi] = r; d[pi+1] = g; d[pi+2] = b;
+          }
+        }
+      }
+    }
+  }
+}
+
+// ── Вспомогательные ──────────────────────────────────
+
+function getLm(lm, idx, w, h) {
+  return { x: lm[idx].x * w, y: lm[idx].y * h };
+}
+
+function stableCorners(p1, p2) {
+  return p1.y < p2.y ? [p1, p2] : [p2, p1];
+}
+
 function lerpPt(a, b, t) {
   return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
 }
- 
+
 function lerpPts(cur, tgt, t) {
   return cur.map((p, i) => lerpPt(p, tgt[i], t));
 }
- 
-function stableCorners(p1, p2) {
-  // верхняя точка (меньше Y) первая
-  return p1.y < p2.y ? [p1, p2] : [p2, p1];
+
+function buildMask(pts) {
+  const w = canvas.width, h = canvas.height;
+  const off = document.createElement("canvas");
+  off.width = w; off.height = h;
+  const c = off.getContext("2d");
+  c.fillStyle = "#fff";
+  c.beginPath();
+  c.moveTo(pts[0].x, pts[0].y);
+  pts.forEach(p => c.lineTo(p.x, p.y));
+  c.closePath();
+  c.fill();
+  return c.getImageData(0, 0, w, h);
 }
- 
-function getLandmark(landmarks, idx, w, h) {
-  return { x: landmarks[idx].x * w, y: landmarks[idx].y * h };
-}
- 
-// ── Применить ЧБ внутри четырёхугольника
-function applyBWRegion(pts) {
-  const w = canvas.width;
-  const h = canvas.height;
- 
-  // Сохраняем текущий кадр
-  const imageData = ctx.getImageData(0, 0, w, h);
-  const data = imageData.data;
- 
-  // Создаём off-screen canvas для маски
-  const offCanvas = document.createElement("canvas");
-  offCanvas.width  = w;
-  offCanvas.height = h;
-  const offCtx = offCanvas.getContext("2d");
- 
-  // Рисуем четырёхугольник как маску
-  offCtx.fillStyle = "#fff";
-  offCtx.beginPath();
-  offCtx.moveTo(pts[0].x, pts[0].y);
-  offCtx.lineTo(pts[1].x, pts[1].y);
-  offCtx.lineTo(pts[2].x, pts[2].y);
-  offCtx.lineTo(pts[3].x, pts[3].y);
-  offCtx.closePath();
-  offCtx.fill();
- 
-  const maskData = offCtx.getImageData(0, 0, w, h).data;
- 
-  // Применяем ЧБ только там где маска белая
-  for (let i = 0; i < data.length; i += 4) {
-    if (maskData[i] > 128) {
-      const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
-      data[i]   = gray;
-      data[i+1] = gray;
-      data[i+2] = gray;
-    }
-  }
- 
-  ctx.putImageData(imageData, 0, 0);
- 
-  // Рисуем контур и точки
-  ctx.strokeStyle = "rgba(255,255,255,0.8)";
-  ctx.lineWidth   = 2;
+
+function drawOverlay(pts, color) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.moveTo(pts[0].x, pts[0].y);
   pts.forEach(p => ctx.lineTo(p.x, p.y));
   ctx.closePath();
   ctx.stroke();
- 
   pts.forEach(p => {
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(0, 180, 255, 0.9)";
+    ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+    ctx.fillStyle = color;
     ctx.fill();
   });
 }
- 
-// ── Callback MediaPipe
+
+const DOT_COLORS = ["rgba(0,180,255,0.9)", "rgba(255,100,50,0.9)", "rgba(80,255,120,0.9)"];
+
+// ── MediaPipe callback ────────────────────────────────
+
 function onResults(results) {
-  const w = canvas.width;
-  const h = canvas.height;
- 
-  // Рисуем видео (зеркалим)
+  const w = canvas.width, h = canvas.height;
+
   ctx.save();
   ctx.scale(-1, 1);
   ctx.drawImage(results.image, -w, 0, w, h);
   ctx.restore();
- 
-  const hands = results.multiHandLandmarks;
+
+  const hands      = results.multiHandLandmarks;
   const handedness = results.multiHandedness;
- 
-  let leftPts  = null;
-  let rightPts = null;
- 
+
+  let leftLm  = null;
+  let rightLm = null;
+
   if (hands && hands.length === 2) {
     for (let i = 0; i < hands.length; i++) {
-      const label = handedness[i].label; // "Left" или "Right"
-      const lm    = hands[i];
-      const thumb = getLandmark(lm, 4,  w, h);
-      const index = getLandmark(lm, 8,  w, h);
- 
-      // После флипа Left/Right меняются
-      if (label === "Left")  rightPts = [thumb, index];
-      else                   leftPts  = [thumb, index];
+      if (handedness[i].label === "Left")  rightLm = hands[i];
+      else                                  leftLm  = hands[i];
     }
   }
- 
-  // ── Обновляем точки
-  if (leftPts && rightPts) {
-    lostFrames = 0;
-    statusEl.textContent = "EFFECT: ON";
-    statusEl.className   = "active";
- 
-    const [lTop, lBot] = stableCorners(leftPts[0],  leftPts[1]);
-    const [rTop, rBot] = stableCorners(rightPts[0], rightPts[1]);
-    const target = [lTop, rTop, rBot, lBot];
- 
-    if (!smoothPts) {
-      smoothPts = target;
+
+  // Получаем общий кадр один раз
+  const imageData = ctx.getImageData(0, 0, w, h);
+
+  effects.forEach((eff, ei) => {
+    const tag = document.getElementById(eff.id);
+    const [f1, f2] = eff.fingers;
+
+    let target = null;
+
+    if (leftLm && rightLm) {
+      const lP1 = getLm(leftLm,  f1, w, h);
+      const lP2 = getLm(leftLm,  f2, w, h);
+      const rP1 = getLm(rightLm, f1, w, h);
+      const rP2 = getLm(rightLm, f2, w, h);
+
+      const [lTop, lBot] = stableCorners(lP1, lP2);
+      const [rTop, rBot] = stableCorners(rP1, rP2);
+      target = [lTop, rTop, rBot, lBot];
+    }
+
+    if (target) {
+      eff.lost = 0;
+      eff.smooth = eff.smooth ? lerpPts(eff.smooth, target, LERP) : target;
+      eff.last = [...eff.smooth];
+      tag.className = "tag on";
     } else {
-      smoothPts = lerpPts(smoothPts, target, LERP);
+      eff.lost++;
+      if (eff.lost < FADE_FRAMES && eff.last) {
+        eff.smooth = eff.last;
+      } else {
+        eff.smooth = null;
+        eff.last   = null;
+      }
+      tag.className = "tag";
     }
-    lastPts = [...smoothPts];
- 
-  } else {
-    lostFrames++;
-    statusEl.textContent = "EFFECT: OFF";
-    statusEl.className   = "";
- 
-    if (lostFrames < FADE_FRAMES && lastPts) {
-      smoothPts = lastPts;
-    } else {
-      smoothPts = null;
-      lastPts   = null;
+
+    if (eff.smooth) {
+      const maskData = buildMask(eff.smooth);
+      // Клонируем imageData чтобы эффекты не мешали друг другу
+      const copy = new ImageData(new Uint8ClampedArray(imageData.data), w, h);
+      eff.fn(copy, maskData);
+      // Копируем только пиксели внутри маски обратно
+      const src = copy.data;
+      const dst = imageData.data;
+      const m   = maskData.data;
+      for (let i = 0; i < dst.length; i += 4) {
+        if (m[i] > 128) {
+          dst[i] = src[i]; dst[i+1] = src[i+1]; dst[i+2] = src[i+2];
+        }
+      }
     }
-  }
- 
-  // ── Рендер эффекта
-  if (smoothPts) {
-    applyBWRegion(smoothPts);
-  }
+  });
+
+  ctx.putImageData(imageData, 0, 0);
+
+  // Рисуем контуры поверх
+  effects.forEach((eff, ei) => {
+    if (eff.smooth) drawOverlay(eff.smooth, DOT_COLORS[ei]);
+  });
 }
- 
-// ── Инициализация MediaPipe Hands
+
+// ── Инициализация ─────────────────────────────────────
+
 const handsDetector = new Hands({
-  locateFile: (file) =>
-    `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+  locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
 });
- 
+
 handsDetector.setOptions({
-  maxNumHands:           2,
-  modelComplexity:       1,
-  minDetectionConfidence: 0.3,
-  minTrackingConfidence:  0.3,
+  maxNumHands: 2,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.4,
+  minTrackingConfidence: 0.4,
 });
- 
+
 handsDetector.onResults(onResults);
- 
-// ── Камера
+
 async function startCamera() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -268,22 +291,19 @@ async function startCamera() {
     video.onloadedmetadata = () => {
       canvas.width  = video.videoWidth;
       canvas.height = video.videoHeight;
-      statusEl.textContent = "EFFECT: OFF";
-      processFrame();
+      loop();
     };
-  } catch (e) {
-    statusEl.textContent = "Camera error: " + e.message;
+  } catch(e) {
+    alert("Camera error: " + e.message);
   }
 }
- 
-// ── Основной цикл
-async function processFrame() {
+
+async function loop() {
   await handsDetector.send({ image: video });
-  requestAnimationFrame(processFrame);
+  requestAnimationFrame(loop);
 }
- 
+
 startCamera();
 </script>
 </body>
 </html>
- 
