@@ -17,80 +17,29 @@
   }
   #container { position: relative; width: 100vw; height: 100vh; }
   #video {
-    position: absolute;
-    width: 100%; height: 100%;
-    object-fit: cover;
-    transform: scaleX(-1);
-    opacity: 0;
-    pointer-events: none;
+    position: absolute; width: 100%; height: 100%;
+    object-fit: cover; transform: scaleX(-1);
+    opacity: 0; pointer-events: none;
   }
-  #canvas {
-    position: absolute;
-    width: 100%; height: 100%;
-    object-fit: cover;
-  }
-  #ui {
-    position: absolute;
-    top: 16px; left: 16px;
-    z-index: 10;
-    pointer-events: none;
-  }
+  #canvas { position: absolute; width: 100%; height: 100%; object-fit: cover; }
+  #ui { position: absolute; top: 16px; left: 16px; z-index: 10; pointer-events: none; }
   #status {
-    font-size: 12px;
-    letter-spacing: 0.15em;
-    text-transform: uppercase;
-    padding: 8px 16px;
-    background: rgba(0,0,0,0.7);
-    border-left: 3px solid #555;
-    color: #aaa;
-    transition: all 0.2s;
-    backdrop-filter: blur(8px);
-    border-radius: 0 8px 8px 0;
-    font-weight: bold;
-    pointer-events: none;
+    font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase;
+    padding: 8px 16px; background: rgba(0,0,0,0.7);
+    border-left: 3px solid #555; color: #aaa;
+    transition: all 0.2s; backdrop-filter: blur(8px);
+    border-radius: 0 8px 8px 0; font-weight: bold;
   }
   #status.active { color: #0f0; border-left-color: #0f0; }
-  #status.pinch { background: rgba(0,255,0,0.2); color: #fff; }
-  .controls-panel {
-    position: absolute;
-    bottom: 20px;
-    left: 20px;
-    right: 20px;
-    background: rgba(0,0,0,0.8);
-    backdrop-filter: blur(8px);
-    padding: 12px;
-    border-radius: 12px;
-    z-index: 20;
-    font-family: monospace;
-    font-size: 11px;
-    color: white;
-    display: flex;
-    gap: 16px;
-    flex-wrap: wrap;
-    justify-content: center;
-    pointer-events: auto;
-  }
-  .controls-panel label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .controls-panel input { width: 100px; cursor: pointer; }
-  .controls-panel span { color: #0f0; }
+  #status.gojo { color: #df00ff; border-left-color: #df00ff; animation: pulse 0.5s infinite alternate; }
+  @keyframes pulse { from { opacity: 1; } to { opacity: 0.5; } }
 </style>
 </head>
 <body>
 <div id="container">
   <video id="video" playsinline autoplay muted></video>
   <canvas id="canvas"></canvas>
-  <div id="ui">
-    <div id="status">Starting camera...</div>
-  </div>
-  <div class="controls-panel">
-    <label>Width: <input type="range" id="scaleX" min="1" max="8" step="0.1" value="3.5"></label>
-    <label>Height: <input type="range" id="scaleY" min="1" max="8" step="0.1" value="3.5"></label>
-    <span id="scaleVal">3.5 x 3.5</span>
-  </div>
+  <div id="ui"><div id="status">Starting...</div></div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
@@ -99,9 +48,6 @@ const video    = document.getElementById("video");
 const canvas   = document.getElementById("canvas");
 const ctx      = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
-const scaleXInput  = document.getElementById("scaleX");
-const scaleYInput  = document.getElementById("scaleY");
-const scaleValSpan = document.getElementById("scaleVal");
 
 const LERP           = 0.7;
 const FADE_FRAMES    = 8;
@@ -111,12 +57,10 @@ const FINGER_LERP    = 0.5;
 const FINGER_TIPS    = [4, 8, 12, 16, 20];
 const FINGER_NAMES   = ["T","I","M","R","P"];
 
-const EFFECTS = ["none", "posterize", "threshold", "pixelate"];
+const EFFECTS = ["none","posterize","threshold","pixelate","glitch","vhs","ascii","thermal"];
 const LABELS  = {
-  none:      "NO EFFECT",
-  posterize: "POSTERIZE",
-  threshold: "THRESHOLD",
-  pixelate:  "PIXELATE",
+  none:"NO EFFECT", posterize:"POSTERIZE", threshold:"THRESHOLD",
+  pixelate:"PIXELATE", glitch:"GLITCH", vhs:"VHS", ascii:"ASCII", thermal:"THERMAL"
 };
 
 let currentEffect = 0;
@@ -126,19 +70,31 @@ let lostFrames    = 0;
 let pinchActive   = false;
 let pinchCooldown = 0;
 let cameraReady   = false;
-let scaleX = 3.5;
-let scaleY = 3.5;
 let smoothLeftTips  = null;
 let smoothRightTips = null;
+let gojoActive    = false;
+let gojoTimer     = 0;
+let effectLabelTimer = 0;
+let effectLabelText  = "";
 
-scaleXInput.addEventListener("input", e => {
-  scaleX = parseFloat(e.target.value);
-  scaleValSpan.textContent = `${scaleX.toFixed(1)} x ${scaleY.toFixed(1)}`;
-});
-scaleYInput.addEventListener("input", e => {
-  scaleY = parseFloat(e.target.value);
-  scaleValSpan.textContent = `${scaleX.toFixed(1)} x ${scaleY.toFixed(1)}`;
-});
+// Glitch state
+let glitchLines = [];
+function randomGlitchLines(w, h) {
+  const lines = [];
+  const count = 8 + Math.floor(Math.random() * 12);
+  for (let i = 0; i < count; i++) {
+    lines.push({
+      y:      Math.floor(Math.random() * h),
+      height: 2 + Math.floor(Math.random() * 18),
+      shift:  (Math.random() - 0.5) * 80,
+      invert: Math.random() < 0.2,
+    });
+  }
+  return lines;
+}
+
+// ASCII chars by brightness
+const ASCII_CHARS = "@#W$9876543210?!abc;:+=-,._  ";
 
 // ── Эффекты ──────────────────────────────────────────
 
@@ -156,9 +112,9 @@ function applyPosterize(d, m) {
 function applyThreshold(d, m) {
   for (let i = 0; i < d.length; i += 4) {
     if (m[i] > 128) {
-      const gray = d[i]*0.299 + d[i+1]*0.587 + d[i+2]*0.114;
-      const val  = gray > 128 ? 255 : 0;
-      d[i] = d[i+1] = d[i+2] = val;
+      const g = d[i]*0.299 + d[i+1]*0.587 + d[i+2]*0.114;
+      const v = g > 128 ? 255 : 0;
+      d[i] = d[i+1] = d[i+2] = v;
     }
   }
 }
@@ -167,133 +123,312 @@ function applyPixelate(d, m, w, h) {
   const block = 12;
   for (let y = 0; y < h; y += block) {
     for (let x = 0; x < w; x += block) {
-      const ci = (y*w+x)*4;
-      if (m[ci] <= 128) continue;
+      if (m[(y*w+x)*4] <= 128) continue;
       const cx = Math.min(x+block/2, w-1);
       const cy = Math.min(y+block/2, h-1);
       const si = (Math.floor(cy)*w+Math.floor(cx))*4;
-      const r=d[si], g=d[si+1], b=d[si+2];
-      for (let dy=0; dy<block && y+dy<h; dy++)
-        for (let dx=0; dx<block && x+dx<w; dx++) {
+      const r=d[si],g=d[si+1],b=d[si+2];
+      for (let dy=0; dy<block&&y+dy<h; dy++)
+        for (let dx=0; dx<block&&x+dx<w; dx++) {
           const pi=((y+dy)*w+(x+dx))*4;
-          if (m[pi]>128){d[pi]=r;d[pi+1]=g;d[pi+2]=b;}
+          if(m[pi]>128){d[pi]=r;d[pi+1]=g;d[pi+2]=b;}
         }
     }
   }
 }
 
+function applyGlitch(d, m, w, h) {
+  // Обновляем линии каждые несколько кадров
+  if (Math.random() < 0.4) glitchLines = randomGlitchLines(w, h);
+
+  // RGB сдвиг
+  const rgbShift = 8 + Math.floor(Math.random() * 16);
+  for (let i = 0; i < d.length; i += 4) {
+    if (m[i] <= 128) continue;
+    const x = (i/4) % w;
+    const y = Math.floor((i/4) / w);
+    const ri = (y*w + Math.min(x+rgbShift, w-1))*4;
+    const bi = (y*w + Math.max(x-rgbShift, 0))*4;
+    if (m[ri]>128) d[i]   = d[ri];
+    if (m[bi]>128) d[i+2] = d[bi];
+  }
+
+  // Полосы со смещением
+  glitchLines.forEach(line => {
+    for (let row = line.y; row < Math.min(line.y+line.height, h); row++) {
+      for (let x = 0; x < w; x++) {
+        const srcX = Math.max(0, Math.min(w-1, x + line.shift));
+        const si = (row*w + Math.floor(srcX))*4;
+        const di = (row*w + x)*4;
+        if (m[di] <= 128 || m[si] <= 128) continue;
+        if (line.invert) {
+          d[di]   = 255 - d[si];
+          d[di+1] = 255 - d[si+1];
+          d[di+2] = 255 - d[si+2];
+        } else {
+          d[di]=d[si]; d[di+1]=d[si+1]; d[di+2]=d[si+2];
+        }
+      }
+    }
+  });
+
+  // Случайные инвертированные блоки
+  if (Math.random() < 0.3) {
+    const bx = Math.floor(Math.random()*w);
+    const by = Math.floor(Math.random()*h);
+    const bw = 20 + Math.floor(Math.random()*80);
+    const bh = 5  + Math.floor(Math.random()*20);
+    for (let y=by; y<Math.min(by+bh,h); y++)
+      for (let x=bx; x<Math.min(bx+bw,w); x++) {
+        const pi=(y*w+x)*4;
+        if(m[pi]>128){d[pi]=255-d[pi];d[pi+1]=255-d[pi+1];d[pi+2]=255-d[pi+2];}
+      }
+  }
+}
+
+function applyVHS(d, m, w, h) {
+  // Шум и выцветание
+  for (let i = 0; i < d.length; i += 4) {
+    if (m[i] <= 128) continue;
+    const noise = (Math.random()-0.5)*30;
+    // Тёплый выцветший оттенок
+    d[i]   = Math.min(255, Math.max(0, d[i]   * 0.85 + 30 + noise));
+    d[i+1] = Math.min(255, Math.max(0, d[i+1] * 0.80 + 20 + noise));
+    d[i+2] = Math.min(255, Math.max(0, d[i+2] * 0.65 + 10 + noise));
+  }
+  // Горизонтальные помехи
+  const lineCount = 3 + Math.floor(Math.random()*4);
+  for (let l=0; l<lineCount; l++) {
+    const ly = Math.floor(Math.random()*h);
+    const shift = (Math.random()-0.5)*20;
+    for (let x=0; x<w; x++) {
+      const si = (ly*w + Math.max(0,Math.min(w-1,Math.floor(x+shift))))*4;
+      const di = (ly*w+x)*4;
+      if (m[di]>128&&m[si]>128){d[di]=d[si];d[di+1]=d[si+1];d[di+2]=d[si+2];}
+    }
+  }
+  // Вертикальная яркостная полоса (трекинг)
+  const trackY = Math.floor(Math.random()*h);
+  if (Math.random()<0.15) {
+    for (let x=0; x<w; x++) {
+      const pi=(trackY*w+x)*4;
+      if(m[pi]>128){d[pi]=Math.min(255,d[pi]+80);d[pi+1]=Math.min(255,d[pi+1]+80);d[pi+2]=Math.min(255,d[pi+2]+80);}
+    }
+  }
+}
+
+function applyASCII(pts) {
+  // ASCII рисуем поверх через canvas text
+  const minX = Math.min(...pts.map(p=>p.x));
+  const maxX = Math.max(...pts.map(p=>p.x));
+  const minY = Math.min(...pts.map(p=>p.y));
+  const maxY = Math.max(...pts.map(p=>p.y));
+  const charW = 8, charH = 12;
+
+  // Читаем пиксели области
+  const regionW = Math.max(1, Math.floor(maxX-minX));
+  const regionH = Math.max(1, Math.floor(maxY-minY));
+  const imgData = ctx.getImageData(minX, minY, regionW, regionH);
+  const d = imgData.data;
+
+  // Закрашиваем область чёрным
+  ctx.fillStyle="#000";
+  ctx.fillRect(minX, minY, regionW, regionH);
+
+  ctx.font = `${charH}px monospace`;
+  ctx.textBaseline = "top";
+
+  for (let y=0; y<regionH; y+=charH) {
+    for (let x=0; x<regionW; x+=charW) {
+      const pi=(y*regionW+x)*4;
+      const brightness = (d[pi]*0.299 + d[pi+1]*0.587 + d[pi+2]*0.114) / 255;
+      const charIdx = Math.floor(brightness * (ASCII_CHARS.length-1));
+      const ch = ASCII_CHARS[charIdx];
+      // Цвет символа по яркости
+      const g = Math.floor(brightness*200+55);
+      ctx.fillStyle = `rgb(${g},${Math.floor(g*0.9)},${Math.floor(g*0.5)})`;
+      ctx.fillText(ch, minX+x, minY+y);
+    }
+  }
+}
+
+function applyThermal(d, m) {
+  for (let i = 0; i < d.length; i += 4) {
+    if (m[i] <= 128) continue;
+    const brightness = (d[i]*0.299 + d[i+1]*0.587 + d[i+2]*0.114) / 255;
+    // Тепловая палитра: тёмно-синий → голубой → зелёный → жёлтый → красный → белый
+    let r, g, b;
+    if (brightness < 0.2) {
+      const t = brightness/0.2;
+      r=0; g=0; b=Math.floor(128+127*t);
+    } else if (brightness < 0.4) {
+      const t=(brightness-0.2)/0.2;
+      r=0; g=Math.floor(255*t); b=255;
+    } else if (brightness < 0.6) {
+      const t=(brightness-0.4)/0.2;
+      r=0; g=255; b=Math.floor(255*(1-t));
+    } else if (brightness < 0.8) {
+      const t=(brightness-0.6)/0.2;
+      r=Math.floor(255*t); g=255; b=0;
+    } else {
+      const t=(brightness-0.8)/0.2;
+      r=255; g=Math.floor(255*(1-t)); b=0;
+    }
+    d[i]=r; d[i+1]=g; d[i+2]=b;
+  }
+}
+
+// ── Годжо Сатору ─────────────────────────────────────
+// Мизинец (20) и безымянный (16) выпрямлены
+// Средний (12) и указательный (8) согнуты (кончики близко к ладони)
+// Большой (4) удерживает их
+
+function isFingerExtended(lm, tipIdx, pipIdx) {
+  // Кончик пальца дальше от запястья чем средний сустав
+  const wrist = lm[0];
+  const tip   = lm[tipIdx];
+  const pip   = lm[pipIdx];
+  const dTip = Math.hypot(tip.x-wrist.x, tip.y-wrist.y);
+  const dPip = Math.hypot(pip.x-wrist.x, pip.y-wrist.y);
+  return dTip > dPip * 1.1;
+}
+
+function isFingerCurled(lm, tipIdx, pipIdx) {
+  return !isFingerExtended(lm, tipIdx, pipIdx);
+}
+
+function detectGojo(lm) {
+  // Мизинец (tip=20, pip=18) выпрямлен
+  const pinkyUp = isFingerExtended(lm, 20, 18);
+  // Безымянный (tip=16, pip=14) выпрямлен
+  const ringUp  = isFingerExtended(lm, 16, 14);
+  // Средний (tip=12, pip=10) согнут
+  const midDown = isFingerCurled(lm, 12, 10);
+  // Указательный (tip=8, pip=6) согнут
+  const idxDown = isFingerCurled(lm, 8, 6);
+  return pinkyUp && ringUp && midDown && idxDown;
+}
+
 // ── Вспомогательные ──────────────────────────────────
 
 function getLm(lm, idx, w, h) {
-  // Координаты MediaPipe в нормализованном пространстве (без флипа)
-  // Флипим X вручную чтобы совпало с отражённым видео
-  return { x: (1 - lm[idx].x) * w, y: lm[idx].y * h };
+  return { x: (1-lm[idx].x)*w, y: lm[idx].y*h };
 }
 
 function getLmRaw(lm, idx) {
   return { x: lm[idx].x, y: lm[idx].y };
 }
 
-function dist(a, b) {
-  return Math.hypot(a.x-b.x, a.y-b.y);
-}
+function dist(a, b) { return Math.hypot(a.x-b.x, a.y-b.y); }
 
 function getAllFingerTips(lm, w, h) {
   return FINGER_TIPS.map(idx => ({
-    idx,
-    x: (1 - lm[idx].x) * w,
-    y: lm[idx].y * h,
+    idx, x:(1-lm[idx].x)*w, y:lm[idx].y*h
   }));
 }
 
 function smoothTips(cur, tgt) {
   if (!cur) return tgt;
-  return tgt.map((t,i) => ({
-    idx: t.idx,
-    x: cur[i].x*(1-FINGER_LERP) + t.x*FINGER_LERP,
-    y: cur[i].y*(1-FINGER_LERP) + t.y*FINGER_LERP,
+  return tgt.map((t,i)=>({
+    idx:t.idx,
+    x:cur[i].x*(1-FINGER_LERP)+t.x*FINGER_LERP,
+    y:cur[i].y*(1-FINGER_LERP)+t.y*FINGER_LERP,
   }));
 }
 
 function drawJoints(lm, color, w, h) {
-  const conn = [
-    [0,1],[1,2],[2,3],[3,4],
-    [0,5],[5,6],[6,7],[7,8],
-    [0,9],[9,10],[10,11],[11,12],
-    [0,13],[13,14],[14,15],[15,16],
-    [0,17],[17,18],[18,19],[19,20]
-  ];
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 1.5;
-  conn.forEach(([a,b]) => {
-    const p1 = getLm(lm, a, w, h);
-    const p2 = getLm(lm, b, w, h);
-    ctx.beginPath();
-    ctx.moveTo(p1.x, p1.y);
-    ctx.lineTo(p2.x, p2.y);
-    ctx.stroke();
+  const conn=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
+              [0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],
+              [0,17],[17,18],[18,19],[19,20]];
+  ctx.strokeStyle=color; ctx.lineWidth=1.5;
+  conn.forEach(([a,b])=>{
+    const p1=getLm(lm,a,w,h), p2=getLm(lm,b,w,h);
+    ctx.beginPath(); ctx.moveTo(p1.x,p1.y); ctx.lineTo(p2.x,p2.y); ctx.stroke();
   });
 }
 
 function drawTips(tips, color) {
-  tips.forEach((t, i) => {
-    ctx.beginPath();
-    ctx.arc(t.x, t.y, 6, 0, Math.PI*2);
-    ctx.fillStyle = color;
-    ctx.fill();
-    ctx.strokeStyle = "#fff";
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-    ctx.fillStyle = "#fff";
-    ctx.font = "bold 9px monospace";
+  tips.forEach((t,i)=>{
+    ctx.beginPath(); ctx.arc(t.x,t.y,6,0,Math.PI*2);
+    ctx.fillStyle=color; ctx.fill();
+    ctx.strokeStyle="#fff"; ctx.lineWidth=1.5; ctx.stroke();
+    ctx.fillStyle="#fff"; ctx.font="bold 9px monospace";
     ctx.fillText(FINGER_NAMES[i], t.x-4, t.y-8);
   });
 }
 
-function getMaskPoints(thumb, index) {
-  const cx = (thumb.x+index.x)/2;
-  const cy = (thumb.y+index.y)/2;
-  const fd = dist(thumb, index);
-  const hw = fd*scaleX;
-  const hh = fd*scaleY;
-  return [
-    {x:cx-hw, y:cy-hh},
-    {x:cx+hw, y:cy-hh},
-    {x:cx+hw, y:cy+hh},
-    {x:cx-hw, y:cy+hh},
-  ];
-}
-
-function lerpPt(a,b,t){ return {x:a.x+(b.x-a.x)*t, y:a.y+(b.y-a.y)*t}; }
-function lerpPts(cur,tgt,t){ return cur.map((p,i)=>lerpPt(p,tgt[i],t)); }
+function lerpPt(a,b,t){return{x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t};}
+function lerpPts(cur,tgt,t){return cur.map((p,i)=>lerpPt(p,tgt[i],t));}
 
 function buildMask(pts) {
   const w=canvas.width, h=canvas.height;
-  const off=document.createElement("canvas");
-  off.width=w; off.height=h;
+  const off=document.createElement("canvas"); off.width=w; off.height=h;
   const c=off.getContext("2d");
   c.fillStyle="#fff";
-  c.beginPath();
-  c.moveTo(pts[0].x,pts[0].y);
+  c.beginPath(); c.moveTo(pts[0].x,pts[0].y);
   pts.forEach(p=>c.lineTo(p.x,p.y));
   c.closePath(); c.fill();
   return c.getImageData(0,0,w,h).data;
 }
 
-function drawOverlay(pts) {
-  ctx.strokeStyle="rgba(255,255,255,0.9)";
-  ctx.lineWidth=3;
-  ctx.beginPath();
-  ctx.moveTo(pts[0].x,pts[0].y);
+// Наклонный прямоугольник по двум точкам рук
+function getRotatedRect(lThumb, lIndex, rThumb, rIndex) {
+  // Центры каждой руки
+  const lCenter = { x:(lThumb.x+lIndex.x)/2, y:(lThumb.y+lIndex.y)/2 };
+  const rCenter = { x:(rThumb.x+rIndex.x)/2, y:(rThumb.y+rIndex.y)/2 };
+
+  // Размер = расстояние между пальцами каждой руки (среднее)
+  const lDist = dist(lThumb, lIndex);
+  const rDist = dist(rThumb, rIndex);
+  const halfW = dist(lCenter, rCenter) / 2 + (lDist+rDist)/2;
+  const halfH = (lDist+rDist)/2 * 1.5;
+
+  // Угол наклона по оси между центрами рук
+  const angle = Math.atan2(rCenter.y-lCenter.y, rCenter.x-lCenter.x);
+  const cx = (lCenter.x+rCenter.x)/2;
+  const cy = (lCenter.y+rCenter.y)/2;
+
+  const cos = Math.cos(angle), sin = Math.sin(angle);
+  // 4 угла наклонного прямоугольника
+  return [
+    { x: cx - cos*halfW + sin*halfH, y: cy - sin*halfW - cos*halfH },
+    { x: cx + cos*halfW + sin*halfH, y: cy + sin*halfW - cos*halfH },
+    { x: cx + cos*halfW - sin*halfH, y: cy + sin*halfW + cos*halfH },
+    { x: cx - cos*halfW - sin*halfH, y: cy - sin*halfW + cos*halfH },
+  ];
+}
+
+function drawOverlay(pts, gojo) {
+  const color = gojo ? "rgba(180,0,255,0.95)" : "rgba(255,255,255,0.9)";
+  ctx.strokeStyle=color; ctx.lineWidth=3;
+  if (gojo) { ctx.shadowBlur=20; ctx.shadowColor="#df00ff"; }
+  ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y);
   pts.forEach(p=>ctx.lineTo(p.x,p.y));
   ctx.closePath(); ctx.stroke();
+  ctx.shadowBlur=0;
   pts.forEach(p=>{
-    ctx.beginPath();
-    ctx.arc(p.x,p.y,6,0,Math.PI*2);
-    ctx.fillStyle="rgba(0,200,255,0.7)";
-    ctx.fill();
-    ctx.strokeStyle="#fff"; ctx.lineWidth=1.5; ctx.stroke();
+    ctx.beginPath(); ctx.arc(p.x,p.y,6,0,Math.PI*2);
+    ctx.fillStyle=gojo?"rgba(180,0,255,0.8)":"rgba(0,200,255,0.7)";
+    ctx.fill(); ctx.strokeStyle="#fff"; ctx.lineWidth=1.5; ctx.stroke();
   });
+}
+
+function drawEffectLabel(pts) {
+  if (effectLabelTimer <= 0) return;
+  effectLabelTimer--;
+  const cx = pts.reduce((s,p)=>s+p.x,0)/pts.length;
+  const cy = pts.reduce((s,p)=>s+p.y,0)/pts.length;
+  const alpha = Math.min(1, effectLabelTimer/20);
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.font = "bold 28px monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.strokeStyle="#000"; ctx.lineWidth=4;
+  ctx.strokeText(effectLabelText, cx, cy);
+  ctx.fillStyle="#fff";
+  ctx.fillText(effectLabelText, cx, cy);
+  ctx.restore();
 }
 
 // ── Главный callback ──────────────────────────────────
@@ -303,175 +438,192 @@ function onResults(results) {
   const w=canvas.width, h=canvas.height;
   if (!w||!h) return;
 
-  // Рисуем видео (флип через CSS на video теге, canvas рисуем напрямую)
-  ctx.save();
-  ctx.scale(-1,1);
-  ctx.drawImage(results.image,-w,0,w,h);
-  ctx.restore();
+  ctx.save(); ctx.scale(-1,1); ctx.drawImage(results.image,-w,0,w,h); ctx.restore();
 
-  const hands      = results.multiHandLandmarks;
-  const handedness = results.multiHandedness;
+  const hands=results.multiHandLandmarks;
+  const handedness=results.multiHandedness;
 
-  // ── ПРАВИЛЬНОЕ определение рук после флипа ──
-  // Видео зеркалим через CSS (scaleX(-1) на video теге)
-  // MediaPipe получает оригинальный (незеркальный) поток
-  // Поэтому: MediaPipe "Right" = правая рука пользователя (без инверсии)
-  // Но координаты X нужно инвертировать (1 - x) чтобы совпасть с флипнутым видео
-  let leftHand  = null;  // физически левая рука
-  let rightHand = null;  // физически правая рука
-
-  if (hands && hands.length >= 1) {
-    for (let i=0; i<hands.length; i++) {
-      const label = handedness[i].label;
-      // MediaPipe "Right" → правая рука, "Left" → левая рука (всё правильно)
-      if (label === "Right") rightHand = hands[i];
-      else                   leftHand  = hands[i];
+  let leftHand=null, rightHand=null;
+  if (hands&&hands.length>=1) {
+    for (let i=0;i<hands.length;i++) {
+      if (handedness[i].label==="Right") rightHand=hands[i];
+      else                               leftHand=hands[i];
     }
   }
 
-  // Рисуем скелеты
+  // Скелеты
   if (leftHand) {
-    drawJoints(leftHand, "rgba(0,200,255,0.35)", w, h);
-    const raw = getAllFingerTips(leftHand, w, h);
-    smoothLeftTips = smoothTips(smoothLeftTips, raw);
-    drawTips(smoothLeftTips, "rgba(0,200,255,0.9)");
-  } else {
-    smoothLeftTips = null;
-  }
+    drawJoints(leftHand,"rgba(0,200,255,0.35)",w,h);
+    const raw=getAllFingerTips(leftHand,w,h);
+    smoothLeftTips=smoothTips(smoothLeftTips,raw);
+    drawTips(smoothLeftTips,"rgba(0,200,255,0.9)");
+  } else smoothLeftTips=null;
 
   if (rightHand) {
-    drawJoints(rightHand, "rgba(255,100,150,0.35)", w, h);
-    const raw = getAllFingerTips(rightHand, w, h);
-    smoothRightTips = smoothTips(smoothRightTips, raw);
-    drawTips(smoothRightTips, "rgba(255,100,150,0.9)");
-  } else {
-    smoothRightTips = null;
+    drawJoints(rightHand,"rgba(255,100,150,0.35)",w,h);
+    const raw=getAllFingerTips(rightHand,w,h);
+    smoothRightTips=smoothTips(smoothRightTips,raw);
+    drawTips(smoothRightTips,"rgba(255,100,150,0.9)");
+  } else smoothRightTips=null;
+
+  // ── Годжо: проверяем обе руки
+  const gojoLeft  = leftHand  ? detectGojo(leftHand)  : false;
+  const gojoRight = rightHand ? detectGojo(rightHand) : false;
+  if (gojoLeft && gojoRight) {
+    gojoActive = true;
+    gojoTimer  = 60; // держим 60 кадров после того как жест пропал
+  } else if (gojoTimer > 0) {
+    gojoTimer--;
+    if (gojoTimer === 0) gojoActive = false;
   }
 
-  // ── Маска и эффект ────────────────────────────────
-
+  // ── Маска ────────────────────────────────────────────
   if (leftHand && rightHand) {
-    const lThumb = getLm(leftHand,  4, w, h);
-    const lIndex = getLm(leftHand,  8, w, h);
-    const rThumb = getLm(rightHand, 4, w, h);
-    const rIndex = getLm(rightHand, 8, w, h);
+    const lThumb=getLm(leftHand,4,w,h), lIndex=getLm(leftHand,8,w,h);
+    const rThumb=getLm(rightHand,4,w,h), rIndex=getLm(rightHand,8,w,h);
 
-    // Щипок проверяем в raw координатах (без флипа)
-    const lPinch = dist(getLmRaw(leftHand,4),  getLmRaw(leftHand,8))  < PINCH_THRESH;
-    const rPinch = dist(getLmRaw(rightHand,4), getLmRaw(rightHand,8)) < PINCH_THRESH;
-    const bothPinch = lPinch && rPinch;
+    // Щипок
+    const lPinch=dist(getLmRaw(leftHand,4),getLmRaw(leftHand,8))<PINCH_THRESH;
+    const rPinch=dist(getLmRaw(rightHand,4),getLmRaw(rightHand,8))<PINCH_THRESH;
+    const bothPinch=lPinch&&rPinch;
 
     if (pinchCooldown>0) pinchCooldown--;
-    if (bothPinch && !pinchActive && pinchCooldown===0) {
-      currentEffect = (currentEffect+1) % EFFECTS.length;
-      pinchActive   = true;
-      pinchCooldown = PINCH_COOLDOWN;
-    } else if (!bothPinch) {
-      pinchActive = false;
+    if (bothPinch&&!pinchActive&&pinchCooldown===0) {
+      currentEffect=(currentEffect+1)%EFFECTS.length;
+      pinchActive=true; pinchCooldown=PINCH_COOLDOWN;
+      effectLabelText=LABELS[EFFECTS[currentEffect]];
+      effectLabelTimer=40;
+    } else if (!bothPinch) pinchActive=false;
+
+    const target=getRotatedRect(lThumb,lIndex,rThumb,rIndex);
+    lostFrames=0;
+    smoothPts=smoothPts?lerpPts(smoothPts,target,LERP):target;
+    lastPts=[...smoothPts];
+
+    const eff=EFFECTS[currentEffect];
+    if (gojoActive) {
+      statusEl.textContent="∞ MURASAKI — HOLLOW PURPLE";
+      statusEl.className="gojo";
+    } else {
+      statusEl.textContent=LABELS[eff]+(bothPinch?" [PINCH]":"");
+      statusEl.className=eff!=="none"?"active":"";
     }
 
-    const lMask = getMaskPoints(lThumb, lIndex);
-    const rMask = getMaskPoints(rThumb, rIndex);
-    const allPts = [...lMask, ...rMask];
-    const minX = Math.min(...allPts.map(p=>p.x));
-    const maxX = Math.max(...allPts.map(p=>p.x));
-    const minY = Math.min(...allPts.map(p=>p.y));
-    const maxY = Math.max(...allPts.map(p=>p.y));
-    const target = [{x:minX,y:minY},{x:maxX,y:minY},{x:maxX,y:maxY},{x:minX,y:maxY}];
-
-    lostFrames = 0;
-    smoothPts  = smoothPts ? lerpPts(smoothPts, target, LERP) : target;
-    lastPts    = [...smoothPts];
-
-    const eff = EFFECTS[currentEffect];
-    statusEl.textContent = LABELS[eff] + (bothPinch ? " [PINCH]" : "");
-    statusEl.className   = eff!=="none" ? "active" : "";
-    if (bothPinch) statusEl.classList.add("pinch");
-
-  } else if (leftHand || rightHand) {
-    const hand  = leftHand || rightHand;
-    const thumb = getLm(hand, 4, w, h);
-    const index = getLm(hand, 8, w, h);
-    const target = getMaskPoints(thumb, index);
-
-    lostFrames = 0;
-    smoothPts  = smoothPts ? lerpPts(smoothPts, target, LERP) : target;
-    lastPts    = [...smoothPts];
-
-    statusEl.textContent = "ONE HAND — show both for effects";
-    statusEl.className   = "";
+  } else if (leftHand||rightHand) {
+    const hand=leftHand||rightHand;
+    const thumb=getLm(hand,4,w,h), index=getLm(hand,8,w,h);
+    const cx=(thumb.x+index.x)/2, cy=(thumb.y+index.y)/2;
+    const fd=dist(thumb,index)*1.5;
+    const target=[
+      {x:cx-fd,y:cy-fd},{x:cx+fd,y:cy-fd},
+      {x:cx+fd,y:cy+fd},{x:cx-fd,y:cy+fd}
+    ];
+    lostFrames=0;
+    smoothPts=smoothPts?lerpPts(smoothPts,target,LERP):target;
+    lastPts=[...smoothPts];
+    statusEl.textContent="ONE HAND — show both for effects";
+    statusEl.className="";
   } else {
     lostFrames++;
-    if (lostFrames < FADE_FRAMES && lastPts) smoothPts = lastPts;
-    else { smoothPts = null; lastPts = null; }
-    statusEl.textContent = "Show both hands";
-    statusEl.className   = "";
+    if (lostFrames<FADE_FRAMES&&lastPts) smoothPts=lastPts;
+    else { smoothPts=null; lastPts=null; }
+    statusEl.textContent="Show both hands";
+    statusEl.className="";
   }
 
-  const eff = EFFECTS[currentEffect];
-  if (smoothPts && eff!=="none") {
-    const imageData = ctx.getImageData(0,0,w,h);
-    const mask = buildMask(smoothPts);
-    if (eff==="posterize") applyPosterize(imageData.data, mask);
-    if (eff==="threshold") applyThreshold(imageData.data, mask);
-    if (eff==="pixelate")  applyPixelate(imageData.data, mask, w, h);
-    ctx.putImageData(imageData,0,0);
-    drawOverlay(smoothPts);
-  } else if (smoothPts) {
-    drawOverlay(smoothPts);
+  // ── Рендер эффекта ────────────────────────────────────
+  const eff=EFFECTS[currentEffect];
+  if (smoothPts) {
+    if (gojoActive) {
+      // Годжо: фиолетовое свечение поверх области
+      const mask=buildMask(smoothPts);
+      const imageData=ctx.getImageData(0,0,w,h);
+      const d=imageData.data;
+      for (let i=0;i<d.length;i+=4) {
+        if (mask[i]>128) {
+          d[i]   = Math.min(255, d[i]*0.3   + 120);
+          d[i+1] = Math.min(255, d[i+1]*0.1 + 0);
+          d[i+2] = Math.min(255, d[i+2]*0.5 + 180);
+        }
+      }
+      ctx.putImageData(imageData,0,0);
+      // Дополнительное свечение
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(smoothPts[0].x,smoothPts[0].y);
+      smoothPts.forEach(p=>ctx.lineTo(p.x,p.y));
+      ctx.closePath();
+      ctx.fillStyle="rgba(180,0,255,0.15)";
+      ctx.shadowBlur=40; ctx.shadowColor="#df00ff";
+      ctx.fill(); ctx.restore();
+
+    } else if (eff!=="none") {
+      if (eff==="ascii") {
+        applyASCII(smoothPts);
+      } else {
+        const imageData=ctx.getImageData(0,0,w,h);
+        const mask=buildMask(smoothPts);
+        if (eff==="posterize") applyPosterize(imageData.data,mask);
+        if (eff==="threshold") applyThreshold(imageData.data,mask);
+        if (eff==="pixelate")  applyPixelate(imageData.data,mask,w,h);
+        if (eff==="glitch")    applyGlitch(imageData.data,mask,w,h);
+        if (eff==="vhs")       applyVHS(imageData.data,mask,w,h);
+        if (eff==="thermal")   applyThermal(imageData.data,mask);
+        ctx.putImageData(imageData,0,0);
+      }
+    }
+    drawOverlay(smoothPts, gojoActive);
+    drawEffectLabel(smoothPts);
   }
 }
 
 // ── Инициализация ─────────────────────────────────────
 
-const handsDetector = new Hands({
-  locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+const handsDetector=new Hands({
+  locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
 });
-
 handsDetector.setOptions({
-  maxNumHands: 2,
-  modelComplexity: 1,
-  minDetectionConfidence: 0.5,
-  minTrackingConfidence: 0.5,
+  maxNumHands:2, modelComplexity:1,
+  minDetectionConfidence:0.5, minTrackingConfidence:0.5,
 });
-
 handsDetector.onResults(onResults);
 
 async function startCamera() {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode:"user", width:{ideal:1280}, height:{ideal:720} }
+    const stream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:"user",width:{ideal:1280},height:{ideal:720}}
     });
-    video.srcObject = stream;
-    return new Promise(resolve => {
-      video.onloadedmetadata = () => {
-        video.play().then(() => {
-          const check = setInterval(() => {
-            if (video.videoWidth > 0) {
+    video.srcObject=stream;
+    return new Promise(resolve=>{
+      video.onloadedmetadata=()=>{
+        video.play().then(()=>{
+          const check=setInterval(()=>{
+            if(video.videoWidth>0){
               clearInterval(check);
-              canvas.width  = video.videoWidth;
-              canvas.height = video.videoHeight;
-              cameraReady   = true;
-              statusEl.textContent = "Show both hands";
+              canvas.width=video.videoWidth;
+              canvas.height=video.videoHeight;
+              cameraReady=true;
+              statusEl.textContent="Show both hands";
               resolve();
             }
-          }, 100);
+          },100);
         });
       };
     });
-  } catch(e) {
-    statusEl.textContent = "Camera error: " + e.message;
-  }
+  } catch(e) { statusEl.textContent="Camera error: "+e.message; }
 }
 
 async function loop() {
-  if (cameraReady && video.readyState >= 2) {
-    await handsDetector.send({ image: video });
+  if(cameraReady&&video.readyState>=2) {
+    if(video.videoWidth!==canvas.width&&video.videoWidth>0){
+      canvas.width=video.videoWidth; canvas.height=video.videoHeight;
+    }
+    await handsDetector.send({image:video});
   }
   requestAnimationFrame(loop);
 }
 
-startCamera().then(() => loop());
+startCamera().then(()=>loop());
 </script>
 </body>
 </html>
