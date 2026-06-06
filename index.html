@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>AR Effect — Fixed Hand Tracking</title>
+<title>AR Effect — Fixed Inversion + Separate Scaling</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -52,18 +52,36 @@
   #status.active { color: #0f0; border-left-color: #0f0; }
   #status.pinch { background: rgba(0,255,0,0.2); color: #fff; }
   
-  #mode-badge {
+  .controls-panel {
     position: absolute;
     bottom: 20px;
+    left: 20px;
     right: 20px;
-    background: rgba(0,0,0,0.6);
-    padding: 6px 12px;
-    border-radius: 20px;
-    font-size: 10px;
-    color: #888;
+    background: rgba(0,0,0,0.8);
+    backdrop-filter: blur(8px);
+    padding: 12px;
+    border-radius: 12px;
+    z-index: 20;
     font-family: monospace;
-    backdrop-filter: blur(4px);
-    pointer-events: none;
+    font-size: 11px;
+    color: white;
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    justify-content: center;
+    pointer-events: auto;
+  }
+  .controls-panel label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .controls-panel input {
+    width: 100px;
+    cursor: pointer;
+  }
+  .controls-panel span {
+    color: #0f0;
   }
 </style>
 </head>
@@ -74,7 +92,11 @@
   <div id="ui">
     <div id="status">🔍 Starting camera...</div>
   </div>
-  <div id="mode-badge">🖐️ TWO HAND MODE</div>
+  <div class="controls-panel">
+    <label>📏 Width: <input type="range" id="scaleX" min="1" max="8" step="0.1" value="3.5"></label>
+    <label>📐 Height: <input type="range" id="scaleY" min="1" max="8" step="0.1" value="3.5"></label>
+    <span id="scaleVal">3.5 x 3.5</span>
+  </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
@@ -83,7 +105,10 @@ const video    = document.getElementById("video");
 const canvas   = document.getElementById("canvas");
 const ctx      = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
-const modeBadge = document.getElementById("mode-badge");
+
+const scaleXInput = document.getElementById("scaleX");
+const scaleYInput = document.getElementById("scaleY");
+const scaleValSpan = document.getElementById("scaleVal");
 
 const LERP         = 0.7;
 const FADE_FRAMES  = 8;
@@ -107,13 +132,23 @@ let pinchCooldown = 0;
 let cameraReady = false;
 let animationRunning = true;
 
-// Режимы
-let trackingMode = "two";
+// Коэффициенты масштабирования маски
+let scaleX = 3.5;
+let scaleY = 3.5;
+
+// Обновление масштаба
+scaleXInput.addEventListener("input", (e) => {
+  scaleX = parseFloat(e.target.value);
+  scaleValSpan.textContent = `${scaleX.toFixed(1)} x ${scaleY.toFixed(1)}`;
+});
+scaleYInput.addEventListener("input", (e) => {
+  scaleY = parseFloat(e.target.value);
+  scaleValSpan.textContent = `${scaleX.toFixed(1)} x ${scaleY.toFixed(1)}`;
+});
 
 // Для плавного трекинга
 let smoothLeftTips = null;
 let smoothRightTips = null;
-let smoothSingleTips = null;
 const FINGER_LERP = 0.5;
 
 const FINGER_TIPS = [4, 8, 12, 16, 20];
@@ -242,8 +277,8 @@ function dist(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
-// РАСШИРЕННАЯ МАСКА - захватывает всю область между пальцами
-function getExpandedMaskPoints(thumb, index, w, h) {
+// Функция создания маски с РАЗДЕЛЬНЫМ масштабированием по X и Y
+function getMaskPoints(thumb, index, w, h) {
   // Центр между большим и указательным
   const centerX = (thumb.x + index.x) / 2;
   const centerY = (thumb.y + index.y) / 2;
@@ -251,12 +286,11 @@ function getExpandedMaskPoints(thumb, index, w, h) {
   // Расстояние между пальцами
   const fingerDist = dist(thumb, index);
   
-  // Размер маски в 3-4 раза больше расстояния между пальцами
-  const expansionFactor = 3.5;
-  const width = fingerDist * expansionFactor;
-  const height = fingerDist * expansionFactor;
+  // Раздельное масштабирование
+  const width = fingerDist * scaleX;
+  const height = fingerDist * scaleY;
   
-  // Возвращаем 4 точки прямоугольника (расширенная маска)
+  // Возвращаем 4 точки прямоугольника
   return [
     { x: centerX - width, y: centerY - height },  // лево-верх
     { x: centerX + width, y: centerY - height },  // право-верх
@@ -297,7 +331,6 @@ function drawOverlay(pts) {
   ctx.closePath();
   ctx.stroke();
   
-  // Рисуем круги на углах маски
   pts.forEach(p => {
     ctx.beginPath();
     ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
@@ -328,39 +361,31 @@ function onResults(results) {
   const hands = results.multiHandLandmarks;
   const handedness = results.multiHandedness;
   
-  let leftHand = null;
-  let rightHand = null;
+  let leftHand = null;   // физически левая рука пользователя
+  let rightHand = null;  // физически правая рука пользователя
 
-  // ИСПРАВЛЕНИЕ: используем handedness от MediaPipe, но с учётом зеркала
+  // ИСПРАВЛЕНИЕ ИНВЕРСИИ:
+  // MediaPipe в ЗЕРКАЛЬНОМ видео определяет Left/Right относительно отражения
+  // Поэтому: 
+  // - Если MediaPipe сказал "Left" → это физически ПРАВАЯ рука пользователя
+  // - Если MediaPipe сказал "Right" → это физически ЛЕВАЯ рука пользователя
   if (hands && hands.length >= 2) {
     for (let i = 0; i < hands.length; i++) {
       const label = handedness[i].label;
       if (label === "Left") {
-        rightHand = hands[i]; // из-за зеркала Left от MediaPipe = правая рука на экране
+        rightHand = hands[i];  // MediaPipe Left = правая рука пользователя
       } else if (label === "Right") {
-        leftHand = hands[i];  // из-за зеркала Right от MediaPipe = левая рука на экране
+        leftHand = hands[i];   // MediaPipe Right = левая рука пользователя
       }
     }
   } else if (hands && hands.length === 1) {
     // Для одной руки - определяем по положению на экране
     const handX = hands[0][0].x;
     if (handX < 0.5) {
-      leftHand = hands[0];  // слева на экране
+      leftHand = hands[0];
     } else {
-      rightHand = hands[0]; // справа на экране
+      rightHand = hands[0];
     }
-  }
-
-  // Авто-переключение режима
-  if (leftHand && rightHand && trackingMode !== "two") {
-    trackingMode = "two";
-    modeBadge.innerHTML = "🖐️ TWO HAND MODE";
-    modeBadge.style.color = "#888";
-    statusEl.textContent = "✌️ Show both hands";
-  } else if ((leftHand || rightHand) && !(leftHand && rightHand) && trackingMode !== "single") {
-    trackingMode = "single";
-    modeBadge.innerHTML = "🖐️ SINGLE HAND MODE";
-    modeBadge.style.color = "#0f0";
   }
 
   // ========== ТРЕКИНГ И ОТРИСОВКА ПАЛЬЦЕВ ==========
@@ -381,14 +406,14 @@ function onResults(results) {
 
   // ========== МАСКА И ЭФФЕКТЫ ==========
   
-  if (trackingMode === "two" && leftHand && rightHand) {
-    // Берём большой и указательный с КАЖДОЙ руки
+  if (leftHand && rightHand) {
+    // Берём большой и указательный с каждой руки
     const leftThumb = getLm(leftHand, 4, w, h);
     const leftIndex = getLm(leftHand, 8, w, h);
     const rightThumb = getLm(rightHand, 4, w, h);
     const rightIndex = getLm(rightHand, 8, w, h);
     
-    // Проверка щипка (исправлено: каждая рука отвечает за себя)
+    // Проверка щипка (каждая рука отвечает за себя)
     const leftPinchRaw = dist(getLmRaw(leftHand, 4), getLmRaw(leftHand, 8)) < PINCH_THRESH;
     const rightPinchRaw = dist(getLmRaw(rightHand, 4), getLmRaw(rightHand, 8)) < PINCH_THRESH;
     const bothPinch = leftPinchRaw && rightPinchRaw;
@@ -405,11 +430,11 @@ function onResults(results) {
       pinchActive = false;
     }
 
-    // РАСШИРЕННАЯ МАСКА для каждой руки
-    const leftMask = getExpandedMaskPoints(leftThumb, leftIndex, w, h);
-    const rightMask = getExpandedMaskPoints(rightThumb, rightIndex, w, h);
+    // МАСКА для каждой руки с РАЗДЕЛЬНЫМ масштабированием
+    const leftMask = getMaskPoints(leftThumb, leftIndex, w, h);
+    const rightMask = getMaskPoints(rightThumb, rightIndex, w, h);
     
-    // Объединяем маски (берём bounding box вокруг обеих)
+    // Объединяем маски (общий bounding box)
     const allPoints = [...leftMask, ...rightMask];
     const minX = Math.min(...allPoints.map(p => p.x));
     const maxX = Math.max(...allPoints.map(p => p.x));
@@ -433,33 +458,20 @@ function onResults(results) {
     if (bothPinch) statusEl.classList.add("pinch");
     else statusEl.classList.remove("pinch");
 
-  } else if (trackingMode === "single") {
-    // Режим одной руки - берём ту которая есть
+  } else if (leftHand || rightHand) {
+    // Режим одной руки
     const activeHand = leftHand || rightHand;
-    if (activeHand) {
-      const thumb = getLm(activeHand, 4, w, h);
-      const index = getLm(activeHand, 8, w, h);
-      
-      // Расширенная маска для одной руки
-      const target = getExpandedMaskPoints(thumb, index, w, h);
-      
-      lostFrames = 0;
-      smoothPts = smoothPts ? lerpPts(smoothPts, target, LERP) : target;
-      lastPts = [...smoothPts];
-      
-      statusEl.textContent = "🖐️ ONE HAND — show two hands for effects";
-      statusEl.className = "";
-    } else {
-      lostFrames++;
-      if (lostFrames < FADE_FRAMES && lastPts) {
-        smoothPts = lastPts;
-      } else {
-        smoothPts = null;
-        lastPts = null;
-      }
-      statusEl.textContent = "🖐️ Show ONE hand";
-      statusEl.className = "";
-    }
+    const thumb = getLm(activeHand, 4, w, h);
+    const index = getLm(activeHand, 8, w, h);
+    
+    const target = getMaskPoints(thumb, index, w, h);
+    
+    lostFrames = 0;
+    smoothPts = smoothPts ? lerpPts(smoothPts, target, LERP) : target;
+    lastPts = [...smoothPts];
+    
+    statusEl.textContent = "🖐️ ONE HAND — use two hands for effects";
+    statusEl.className = "";
   } else {
     lostFrames++;
     if (lostFrames < FADE_FRAMES && lastPts) {
