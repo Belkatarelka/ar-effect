@@ -32,21 +32,18 @@
     position: absolute;
     top: 16px; left: 16px;
     z-index: 10;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
   }
-  .tag {
-    font-size: 11px;
-    letter-spacing: 0.12em;
+  #status {
+    font-size: 12px;
+    letter-spacing: 0.15em;
     text-transform: uppercase;
-    padding: 4px 10px;
-    border-left: 2px solid #444;
-    color: #666;
-    background: rgba(0,0,0,0.5);
-    transition: color 0.2s, border-color 0.2s;
+    padding: 6px 12px;
+    background: rgba(0,0,0,0.6);
+    border-left: 2px solid #555;
+    color: #aaa;
+    transition: all 0.2s;
   }
-  .tag.on { color: #fff; border-left-color: #fff; }
+  #status.active { color: #fff; border-left-color: #fff; }
 </style>
 </head>
 <body>
@@ -54,33 +51,40 @@
   <video id="video" playsinline autoplay muted></video>
   <canvas id="canvas"></canvas>
   <div id="ui">
-    <div class="tag" id="t1">Thumb+Index — Posterize</div>
-    <div class="tag" id="t2">Index+Middle — Threshold</div>
-    <div class="tag" id="t3">Ring+Pinky — Pixelate</div>
+    <div id="status">Show both hands</div>
   </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
 <script>
-const video  = document.getElementById("video");
-const canvas = document.getElementById("canvas");
-const ctx    = canvas.getContext("2d");
+const video    = document.getElementById("video");
+const canvas   = document.getElementById("canvas");
+const ctx      = canvas.getContext("2d");
+const statusEl = document.getElementById("status");
 
-const LERP        = 0.4;
-const FADE_FRAMES = 8;
+const LERP         = 0.4;
+const FADE_FRAMES  = 8;
+const PINCH_THRESH = 0.06;  // порог щипка в нормализованных координатах
+const PINCH_COOLDOWN = 20;  // кадров между переключениями
 
-// Три независимых состояния
-const effects = [
-  { id: "t1", smooth: null, last: null, lost: 0, fingers: [4, 8],   fn: posterize },
-  { id: "t2", smooth: null, last: null, lost: 0, fingers: [8, 12],  fn: threshold },
-  { id: "t3", smooth: null, last: null, lost: 0, fingers: [16, 20], fn: pixelate  },
-];
+const EFFECTS = ["none", "posterize", "threshold", "pixelate"];
+const LABELS  = {
+  none:      "— No Effect —",
+  posterize: "Posterize",
+  threshold: "Threshold",
+  pixelate:  "Pixelate",
+};
+
+let currentEffect = 0;  // индекс в EFFECTS
+let smoothPts  = null;
+let lastPts    = null;
+let lostFrames = 0;
+let pinchActive   = false;  // сейчас зажат щипок
+let pinchCooldown = 0;      // cooldown чтобы не переключало несколько раз подряд
 
 // ── Эффекты ──────────────────────────────────────────
 
-function posterize(imageData, maskData) {
-  const d = imageData.data;
-  const m = maskData.data;
+function applyPosterize(d, m) {
   const levels = 4;
   const step = 255 / (levels - 1);
   for (let i = 0; i < d.length; i += 4) {
@@ -92,9 +96,7 @@ function posterize(imageData, maskData) {
   }
 }
 
-function threshold(imageData, maskData) {
-  const d = imageData.data;
-  const m = maskData.data;
+function applyThreshold(d, m) {
   for (let i = 0; i < d.length; i += 4) {
     if (m[i] > 128) {
       const gray = d[i] * 0.299 + d[i+1] * 0.587 + d[i+2] * 0.114;
@@ -104,29 +106,20 @@ function threshold(imageData, maskData) {
   }
 }
 
-function pixelate(imageData, maskData) {
-  const d = imageData.data;
-  const m = maskData.data;
-  const w = canvas.width;
-  const h = canvas.height;
+function applyPixelate(d, m, w, h) {
   const block = 16;
-
   for (let y = 0; y < h; y += block) {
     for (let x = 0; x < w; x += block) {
       const ci = (y * w + x) * 4;
       if (m[ci] <= 128) continue;
-      // Берём цвет из центра блока
       const cx = Math.min(x + block / 2, w - 1);
       const cy = Math.min(y + block / 2, h - 1);
       const si = (Math.floor(cy) * w + Math.floor(cx)) * 4;
       const r = d[si], g = d[si+1], b = d[si+2];
-      // Заливаем весь блок
-      for (let dy = 0; dy < block && y + dy < h; dy++) {
-        for (let dx = 0; dx < block && x + dx < w; dx++) {
-          const pi = ((y + dy) * w + (x + dx)) * 4;
-          if (m[pi] > 128) {
-            d[pi] = r; d[pi+1] = g; d[pi+2] = b;
-          }
+      for (let dy = 0; dy < block && y+dy < h; dy++) {
+        for (let dx = 0; dx < block && x+dx < w; dx++) {
+          const pi = ((y+dy)*w + (x+dx))*4;
+          if (m[pi] > 128) { d[pi]=r; d[pi+1]=g; d[pi+2]=b; }
         }
       }
     }
@@ -139,16 +132,24 @@ function getLm(lm, idx, w, h) {
   return { x: lm[idx].x * w, y: lm[idx].y * h };
 }
 
+function getLmRaw(lm, idx) {
+  return { x: lm[idx].x, y: lm[idx].y };
+}
+
+function dist(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
 function stableCorners(p1, p2) {
   return p1.y < p2.y ? [p1, p2] : [p2, p1];
 }
 
 function lerpPt(a, b, t) {
-  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+  return { x: a.x+(b.x-a.x)*t, y: a.y+(b.y-a.y)*t };
 }
 
 function lerpPts(cur, tgt, t) {
-  return cur.map((p, i) => lerpPt(p, tgt[i], t));
+  return cur.map((p,i) => lerpPt(p, tgt[i], t));
 }
 
 function buildMask(pts) {
@@ -162,11 +163,11 @@ function buildMask(pts) {
   pts.forEach(p => c.lineTo(p.x, p.y));
   c.closePath();
   c.fill();
-  return c.getImageData(0, 0, w, h);
+  return c.getImageData(0, 0, w, h).data;
 }
 
-function drawOverlay(pts, color) {
-  ctx.strokeStyle = color;
+function drawOverlay(pts) {
+  ctx.strokeStyle = "rgba(255,255,255,0.7)";
   ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.moveTo(pts[0].x, pts[0].y);
@@ -175,13 +176,11 @@ function drawOverlay(pts, color) {
   ctx.stroke();
   pts.forEach(p => {
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
-    ctx.fillStyle = color;
+    ctx.arc(p.x, p.y, 6, 0, Math.PI*2);
+    ctx.fillStyle = "rgba(0,180,255,0.9)";
     ctx.fill();
   });
 }
-
-const DOT_COLORS = ["rgba(0,180,255,0.9)", "rgba(255,100,50,0.9)", "rgba(80,255,120,0.9)"];
 
 // ── MediaPipe callback ────────────────────────────────
 
@@ -206,65 +205,73 @@ function onResults(results) {
     }
   }
 
-  // Получаем общий кадр один раз
-  const imageData = ctx.getImageData(0, 0, w, h);
+  if (leftLm && rightLm) {
+    // ── Определяем щипок: расстояние между большим(4) и указательным(8) на обеих руках
+    const lThumb = getLmRaw(leftLm,  4);
+    const lIndex = getLmRaw(leftLm,  8);
+    const rThumb = getLmRaw(rightLm, 4);
+    const rIndex = getLmRaw(rightLm, 8);
 
-  effects.forEach((eff, ei) => {
-    const tag = document.getElementById(eff.id);
-    const [f1, f2] = eff.fingers;
+    const lPinch = dist(lThumb, lIndex) < PINCH_THRESH;
+    const rPinch = dist(rThumb, rIndex) < PINCH_THRESH;
+    const bothPinch = lPinch && rPinch;
 
-    let target = null;
+    if (pinchCooldown > 0) pinchCooldown--;
 
-    if (leftLm && rightLm) {
-      const lP1 = getLm(leftLm,  f1, w, h);
-      const lP2 = getLm(leftLm,  f2, w, h);
-      const rP1 = getLm(rightLm, f1, w, h);
-      const rP2 = getLm(rightLm, f2, w, h);
-
-      const [lTop, lBot] = stableCorners(lP1, lP2);
-      const [rTop, rBot] = stableCorners(rP1, rP2);
-      target = [lTop, rTop, rBot, lBot];
+    if (bothPinch && !pinchActive && pinchCooldown === 0) {
+      // Щипок зажат — переключаем эффект
+      currentEffect = (currentEffect + 1) % EFFECTS.length;
+      pinchActive   = true;
+      pinchCooldown = PINCH_COOLDOWN;
+    } else if (!bothPinch) {
+      pinchActive = false;
     }
 
-    if (target) {
-      eff.lost = 0;
-      eff.smooth = eff.smooth ? lerpPts(eff.smooth, target, LERP) : target;
-      eff.last = [...eff.smooth];
-      tag.className = "tag on";
+    // ── Точки области: большой(4) и указательный(8)
+    const lP1 = getLm(leftLm,  4, w, h);
+    const lP2 = getLm(leftLm,  8, w, h);
+    const rP1 = getLm(rightLm, 4, w, h);
+    const rP2 = getLm(rightLm, 8, w, h);
+
+    const [lTop, lBot] = stableCorners(lP1, lP2);
+    const [rTop, rBot] = stableCorners(rP1, rP2);
+    const target = [lTop, rTop, rBot, lBot];
+
+    lostFrames = 0;
+    smoothPts  = smoothPts ? lerpPts(smoothPts, target, LERP) : target;
+    lastPts    = [...smoothPts];
+
+    const eff = EFFECTS[currentEffect];
+    statusEl.textContent = LABELS[eff] + (bothPinch ? " ●" : "");
+    statusEl.className   = eff !== "none" ? "active" : "";
+
+  } else {
+    lostFrames++;
+    if (lostFrames < FADE_FRAMES && lastPts) {
+      smoothPts = lastPts;
     } else {
-      eff.lost++;
-      if (eff.lost < FADE_FRAMES && eff.last) {
-        eff.smooth = eff.last;
-      } else {
-        eff.smooth = null;
-        eff.last   = null;
-      }
-      tag.className = "tag";
+      smoothPts = null;
+      lastPts   = null;
     }
+    statusEl.textContent = "Show both hands";
+    statusEl.className   = "";
+  }
 
-    if (eff.smooth) {
-      const maskData = buildMask(eff.smooth);
-      // Клонируем imageData чтобы эффекты не мешали друг другу
-      const copy = new ImageData(new Uint8ClampedArray(imageData.data), w, h);
-      eff.fn(copy, maskData);
-      // Копируем только пиксели внутри маски обратно
-      const src = copy.data;
-      const dst = imageData.data;
-      const m   = maskData.data;
-      for (let i = 0; i < dst.length; i += 4) {
-        if (m[i] > 128) {
-          dst[i] = src[i]; dst[i+1] = src[i+1]; dst[i+2] = src[i+2];
-        }
-      }
-    }
-  });
+  // ── Рендер эффекта
+  const eff = EFFECTS[currentEffect];
+  if (smoothPts && eff !== "none") {
+    const imageData = ctx.getImageData(0, 0, w, h);
+    const mask      = buildMask(smoothPts);
 
-  ctx.putImageData(imageData, 0, 0);
+    if (eff === "posterize") applyPosterize(imageData.data, mask);
+    if (eff === "threshold") applyThreshold(imageData.data, mask);
+    if (eff === "pixelate")  applyPixelate(imageData.data, mask, w, h);
 
-  // Рисуем контуры поверх
-  effects.forEach((eff, ei) => {
-    if (eff.smooth) drawOverlay(eff.smooth, DOT_COLORS[ei]);
-  });
+    ctx.putImageData(imageData, 0, 0);
+    drawOverlay(smoothPts);
+  } else if (smoothPts) {
+    drawOverlay(smoothPts);
+  }
 }
 
 // ── Инициализация ─────────────────────────────────────
