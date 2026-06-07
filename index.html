@@ -514,93 +514,147 @@ function drawEffectLabel(pts) {
 }
 
 // ── Реалистичная чёрная дыра (стиль Interstellar) ───
+
+// Частицы аккреционного диска — создаём один раз
+const _bhParticles = Array.from({length: 280}, () => ({
+  angle: Math.random() * Math.PI * 2,
+  dist:  0.9 + Math.random() * 2.2,
+  speed: 0.005 + Math.random() * 0.016,
+  alpha: 0.3 + Math.random() * 0.7,
+  size:  0.4 + Math.random() * 1.8,
+  r: 220 + Math.floor(Math.random() * 35),
+  g:  90 + Math.floor(Math.random() * 110),
+  b:   5 + Math.floor(Math.random() * 55),
+}));
+
 function drawBlackHole(x, y, progress) {
   const r = blackHoleRadius;
   const t = Date.now() / 1000;
   if (r < 2) return;
-
   ctx.save();
 
-  // ── 1. Дальнее свечение (корона)
-  const corona = ctx.createRadialGradient(x, y, r*0.8, x, y, r*4.5);
-  corona.addColorStop(0,   `rgba(255,180,60,${0.18*progress})`);
-  corona.addColorStop(0.3, `rgba(255,100,10,${0.10*progress})`);
-  corona.addColorStop(0.6, `rgba(180,60,0,${0.05*progress})`);
-  corona.addColorStop(1,   "rgba(0,0,0,0)");
-  ctx.beginPath();
-  ctx.arc(x, y, r*4.5, 0, Math.PI*2);
-  ctx.fillStyle = corona;
-  ctx.fill();
+  // ── 1. Дальнее фоновое свечение
+  const glow = ctx.createRadialGradient(x, y, r*0.8, x, y, r*7);
+  glow.addColorStop(0,   `rgba(255,150,40,${0.14*progress})`);
+  glow.addColorStop(0.3, `rgba(180,70,10,${0.07*progress})`);
+  glow.addColorStop(0.7, `rgba(60,15,0,${0.03*progress})`);
+  glow.addColorStop(1,   "rgba(0,0,0,0)");
+  ctx.beginPath(); ctx.arc(x, y, r*7, 0, Math.PI*2);
+  ctx.fillStyle = glow; ctx.fill();
 
-  // ── 2. Аккреционный диск (эллипс, наклонён как в Interstellar)
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(t * 0.3); // медленное вращение диска
+  // ── 2. Аккреционный диск — основные слои (доплеровский сдвиг: левая сторона ярче)
+  ctx.save(); ctx.translate(x, y);
+  for (let i = 9; i >= 1; i--) {
+    const rx = r * (1.2 + i * 0.30);
+    const ry = rx * 0.10;
+    const alpha = (i / 9) * 0.92 * progress;
+    const gr = ctx.createLinearGradient(-rx, 0, rx, 0);
+    gr.addColorStop(0,    `rgba(255,250,210,${alpha})`);
+    gr.addColorStop(0.12, `rgba(255,220,140,${alpha*0.95})`);
+    gr.addColorStop(0.28, `rgba(255,170,50,${alpha*0.82})`);
+    gr.addColorStop(0.48, `rgba(230,90,10,${alpha*0.52})`);
+    gr.addColorStop(0.68, `rgba(150,38,0,${alpha*0.25})`);
+    gr.addColorStop(0.88, `rgba(75,12,0,${alpha*0.10})`);
+    gr.addColorStop(1,    `rgba(30,3,0,${alpha*0.03})`);
+    ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI*2);
+    ctx.fillStyle = gr; ctx.fill();
+  }
 
-  // Верхняя половина диска (перед дырой)
-  for (let ring=6; ring>=1; ring--) {
-    const rx = r * (1.4 + ring*0.35);
-    const ry = rx * 0.28;
-    const brightness = ring / 6;
-    const diskGr = ctx.createRadialGradient(0,0,r*0.9, 0,0,rx);
-    diskGr.addColorStop(0,   `rgba(255,${150+Math.floor(brightness*80)},${Math.floor(brightness*40)},${0.9*brightness*progress})`);
-    diskGr.addColorStop(0.4, `rgba(255,${80+Math.floor(brightness*60)},0,${0.6*brightness*progress})`);
-    diskGr.addColorStop(0.8, `rgba(180,40,0,${0.3*brightness*progress})`);
-    diskGr.addColorStop(1,   "rgba(0,0,0,0)");
-    ctx.beginPath();
-    ctx.ellipse(0, 0, rx, ry, 0, Math.PI, Math.PI*2); // только верх
-    ctx.fillStyle = diskGr;
-    ctx.fill();
+  // Центральная сверхяркая полоса (экватор диска)
+  const jet = ctx.createLinearGradient(-r*4.0, 0, r*4.0, 0);
+  jet.addColorStop(0,    `rgba(255,255,235,${0.98*progress})`);
+  jet.addColorStop(0.10, `rgba(255,235,160,${0.88*progress})`);
+  jet.addColorStop(0.30, `rgba(255,155,30,${0.50*progress})`);
+  jet.addColorStop(0.58, `rgba(190,60,5,${0.22*progress})`);
+  jet.addColorStop(0.82, `rgba(90,15,0,${0.08*progress})`);
+  jet.addColorStop(1,    `rgba(25,3,0,${0.02*progress})`);
+  ctx.beginPath(); ctx.ellipse(0, 0, r*4.0, r*0.048, 0, 0, Math.PI*2);
+  ctx.fillStyle = jet; ctx.fill();
+  ctx.restore();
+
+  // ── 3. Гравитационное линзирование — верхняя дуга (диск загибается над горизонтом)
+  ctx.save(); ctx.translate(x, y);
+  for (let i = 6; i >= 1; i--) {
+    const rx = r * (1.10 + i * 0.10);
+    const ry = rx * 0.32;
+    const alpha = (i / 6) * 0.58 * progress;
+    const grTop = ctx.createLinearGradient(-rx, 0, rx, 0);
+    grTop.addColorStop(0,   `rgba(255,215,110,${alpha})`);
+    grTop.addColorStop(0.38,`rgba(235,105,18,${alpha*0.52})`);
+    grTop.addColorStop(1,   `rgba(70,14,0,${alpha*0.10})`);
+    ctx.beginPath(); ctx.ellipse(0, -r*0.07, rx, ry, 0, Math.PI, Math.PI*2);
+    ctx.fillStyle = grTop; ctx.fill();
+  }
+  // Нижняя дуга (слабее)
+  for (let i = 4; i >= 1; i--) {
+    const rx = r * (1.08 + i * 0.09);
+    const ry = rx * 0.24;
+    const alpha = (i / 4) * 0.38 * progress;
+    const grBot = ctx.createLinearGradient(-rx, 0, rx, 0);
+    grBot.addColorStop(0,   `rgba(255,190,80,${alpha})`);
+    grBot.addColorStop(0.4, `rgba(190,65,8,${alpha*0.45})`);
+    grBot.addColorStop(1,   `rgba(55,10,0,${alpha*0.08})`);
+    ctx.beginPath(); ctx.ellipse(0, r*0.07, rx, ry, 0, 0, Math.PI);
+    ctx.fillStyle = grBot; ctx.fill();
   }
   ctx.restore();
 
-  // ── 3. Фотонное кольцо (тонкое яркое кольцо вокруг тени)
-  ctx.save();
-  ctx.translate(x, y);
-  const photonGr = ctx.createRadialGradient(0,0,r*0.95, 0,0,r*1.25);
-  photonGr.addColorStop(0,   `rgba(255,220,140,${0.9*progress})`);
-  photonGr.addColorStop(0.4, `rgba(255,160,40,${0.6*progress})`);
-  photonGr.addColorStop(1,   "rgba(0,0,0,0)");
-  ctx.beginPath();
-  ctx.arc(0, 0, r*1.25, 0, Math.PI*2);
-  ctx.fillStyle = photonGr;
-  ctx.fill();
-  ctx.restore();
-
-  // ── 4. Нижняя половина диска (за дырой, чуть темнее)
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(t * 0.3);
-  for (let ring=4; ring>=1; ring--) {
-    const rx = r * (1.3 + ring*0.3);
-    const ry = rx * 0.22;
-    const brightness = (ring / 4) * 0.6;
-    ctx.beginPath();
-    ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI);
-    ctx.fillStyle = `rgba(200,80,0,${0.35*brightness*progress})`;
+  // ── 4. Орбитальные частицы (поток материи в диск)
+  _bhParticles.forEach(p => {
+    p.angle += p.speed * (1 + 0.5 / p.dist);
+    p.dist  -= 0.0025;
+    if (p.dist < 0.80) {
+      p.dist  = 1.8 + Math.random() * 1.6;
+      p.angle = Math.random() * Math.PI * 2;
+    }
+    const px = x + Math.cos(p.angle) * p.dist * r;
+    const py = y + Math.sin(p.angle) * p.dist * r * 0.10;
+    const fade = Math.min(1, (p.dist - 0.80) * 3);
+    // Доплер: левая сторона ярче
+    const doppler = 0.55 + 0.45 * Math.cos(p.angle);
+    ctx.beginPath(); ctx.arc(px, py, p.size, 0, Math.PI*2);
+    ctx.fillStyle = `rgba(${p.r},${Math.floor(p.g*doppler)},${Math.floor(p.b*0.4)},${p.alpha*fade*progress*0.7})`;
     ctx.fill();
-  }
+  });
+
+  // ── 5. Фотонная сфера — тонкое яркое кольцо у горизонта
+  const photonR = r * 1.07;
+  const pRing = ctx.createRadialGradient(x, y, photonR*0.88, x, y, photonR*1.20);
+  pRing.addColorStop(0,   "rgba(0,0,0,0)");
+  pRing.addColorStop(0.38,`rgba(255,248,190,${0.82*progress})`);
+  pRing.addColorStop(0.62,`rgba(255,195,55,${0.48*progress})`);
+  pRing.addColorStop(1,   "rgba(0,0,0,0)");
+  ctx.beginPath(); ctx.arc(x, y, photonR*1.20, 0, Math.PI*2);
+  ctx.fillStyle = pRing; ctx.fill();
+
+  // Пульсация фотонного кольца
+  const pulse = 0.5 + 0.5*Math.sin(t * 4.2);
+  const pPulse = ctx.createRadialGradient(x, y, photonR*0.94, x, y, photonR*1.10);
+  pPulse.addColorStop(0,   "rgba(0,0,0,0)");
+  pPulse.addColorStop(0.5, `rgba(255,220,100,${0.30*pulse*progress})`);
+  pPulse.addColorStop(1,   "rgba(0,0,0,0)");
+  ctx.beginPath(); ctx.arc(x, y, photonR*1.10, 0, Math.PI*2);
+  ctx.fillStyle = pPulse; ctx.fill();
+
+  // ── 6. Горизонт событий — абсолютно чёрный круг
+  const shadow = ctx.createRadialGradient(x-r*0.20, y-r*0.15, r*0.04, x, y, r);
+  shadow.addColorStop(0,    "rgba(8,4,1,1)");
+  shadow.addColorStop(0.55, "rgba(2,1,0,1)");
+  shadow.addColorStop(1,    "rgba(0,0,0,1)");
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2);
+  ctx.fillStyle = shadow; ctx.fill();
+
+  // ── 7. Нижняя часть диска поверх горизонта (реализм — диск проходит перед дырой)
+  ctx.save(); ctx.translate(x, y);
+  const rx2 = r*4.0, ry2 = rx2*0.048;
+  const overGr = ctx.createLinearGradient(-rx2, 0, rx2, 0);
+  overGr.addColorStop(0,   `rgba(255,225,155,${0.72*progress})`);
+  overGr.addColorStop(0.18,`rgba(255,155,35,${0.52*progress})`);
+  overGr.addColorStop(0.50,`rgba(195,55,0,${0.25*progress})`);
+  overGr.addColorStop(1,   `rgba(55,8,0,${0.05*progress})`);
+  ctx.beginPath(); ctx.ellipse(0, 0, rx2, ry2, 0, 0, Math.PI);
+  ctx.fillStyle = overGr; ctx.fill();
   ctx.restore();
-
-  // ── 5. Тень (сама чёрная дыра)
-  const shadow = ctx.createRadialGradient(x-r*0.15, y-r*0.1, 0, x, y, r*1.05);
-  shadow.addColorStop(0,    "rgba(0,0,0,1)");
-  shadow.addColorStop(0.85, "rgba(0,0,0,1)");
-  shadow.addColorStop(1,    "rgba(0,0,0,0)");
-  ctx.beginPath();
-  ctx.arc(x, y, r*1.05, 0, Math.PI*2);
-  ctx.fillStyle = shadow;
-  ctx.fill();
-
-  // ── 6. Тонкое гравитационное кольцо (линзирование)
-  ctx.beginPath();
-  ctx.arc(x, y, r*1.06, 0, Math.PI*2);
-  ctx.strokeStyle = `rgba(255,200,100,${0.5*progress})`;
-  ctx.lineWidth = 1.5;
-  ctx.shadowBlur = 8;
-  ctx.shadowColor = "rgba(255,150,30,0.8)";
-  ctx.stroke();
-  ctx.shadowBlur = 0;
 
   ctx.restore();
 }
